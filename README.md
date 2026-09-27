@@ -87,8 +87,21 @@ flowchart TB
     Compiler <-->|"Tool Calls & JSON Responses"| Tools
     Tools <-->|"docker exec / subprocess"| ContA
     ContA -->|"git add -N . && git diff --binary"| ContB
-    ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"]
+ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"]
 ```
+
+### Supported tools
+
+| Tool | Purpose |
+| --- | --- |
+| `run_command` | Run shell commands in the task workspace. |
+| `read_file` | Read workspace files. |
+| `edit_file` / `write_file` | Modify or create workspace files. |
+| `get_status` | Check remaining budget and patch status. |
+| `submit_patch` | Submit the generated Git diff. |
+| `get_code_neighbors` | Find related symbols and callers. |
+| `search_similar_code` | Find semantically similar code. |
+| `get_code_subgraph` | Inspect relationships among code symbols. |
 
 ## Quick start
 
