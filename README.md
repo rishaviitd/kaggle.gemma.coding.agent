@@ -14,7 +14,7 @@
 
 <p align="center">
   <a href="https://www.kaggle.com/competitions/gemma-4-developer-agent">Competition</a> ·
-  <a href="SETUP.md">Setup Guide</a>
+  <a href="#quick-start">Quick start</a>
 </p>
 
 <p align="center">
@@ -107,26 +107,55 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 
 ## Quick start
 
-Follow [SETUP.md](SETUP.md) to restore Python dependencies, obtain the task assets, and build the Docker sandbox. Organizer wheels and datasets are required and are excluded from Git.
-
-Create a root `.env` file:
-
-```dotenv
-VLLM_API_KEY=your-key-here
-LOCAL_INFERENCE_URL=https://your-model-server/v1
-```
-
-The remote server must support automatic tool calling. Run the default task:
+Python 3.12 is required. Restore the environment from the lockfile:
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 --model gemma4
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.lock.txt
 ```
 
-Verify the setup using the reference patch:
+Start Docker Desktop and build the sandbox image:
+
+```bash
+docker build --platform linux/amd64 -t swebench-sandbox:latest -f data/docker/Dockerfile.sandbox data/docker
+```
+
+The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. Only the `fastapi_11194` snapshot, graph, and embeddings are currently available locally.
+
+### Verify the reference fix
+
+This runs without a model and confirms the local evaluation setup:
 
 ```bash
 .venv/bin/python scripts/evaluate.py --reference-check
 ```
+
+### Run the local evaluation pipeline
+
+The local inference server must expose the competition model and support automatic tool calling. Start it, then set the endpoint and run:
+
+```bash
+LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/evaluate.py
+```
+
+This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes to `results/baseline/`. Reference patches are used only with `--reference-check`.
+
+### Run with a remote vLLM server
+
+The remote vLLM server must enable Gemma tool and reasoning parsers. Store its key in the root `.env` file:
+
+```dotenv
+VLLM_API_KEY=your-key-here
+```
+
+Run the base-model pipeline (or pass `--api-base` for a different endpoint):
+
+```bash
+.venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 \
+  --api-base https://your-model-server/v1 --model gemma4
+```
+
+It checks tool calling before starting, runs workspaces and verification locally in Docker, and saves patches, logs, traces, and results under `results/remote-baseline/`. Defaults allow 50 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
 
 ## Project structure
 
@@ -137,7 +166,6 @@ Verify the setup using the reference patch:
 │   └── evaluate.py         Evaluation and reference checks
 ├── context/                Competition and harness notes
 ├── requirements.lock.txt   Python dependencies
-├── SETUP.md                Detailed setup instructions
 ├── data/                   Local task assets (ignored)
 ├── wheelhouse/             Organizer wheels (ignored)
 └── results/                Patches, logs, traces, and results (ignored)
