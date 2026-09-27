@@ -52,17 +52,22 @@ Reference fixes and verification tests are available for training and offline an
 
 ### Test data
 
-The hidden test set contains **about 120 tasks from private repositories**, divided roughly equally between public and private leaderboard splits. Both splits remain hidden.
+The hidden test set has **about 120 tasks from private repositories**, split between public and private leaderboard evaluations. Reference fixes and grading tests are withheld.
 
-Agents receive issue descriptions, repository context, graphs, and embeddings. **Reference fixes and grading tests are withheld.** Predicted Git patches are recorded in `submission.parquet` and scored by the percentage of tasks resolved. Grading tests are verified to fail before the reference fix and pass afterward.
+## Harness
 
-## What it does
+The harness follows a SWE-bench-style, two-phase workflow: an agent investigates each task in an isolated workspace and submits a patch; a fresh sandbox applies that patch and runs hidden tests. The final score is the share of tasks whose tests pass.
 
-- Navigates code with file tools, repository graphs, and semantic search.
-- Uses a main coding agent and a code analyzer configured through YAML.
-- Runs remote model inference while keeping workspaces and tests local.
-- Saves patches, execution logs, traces, and test results for each task.
-- Supports reference-patch checks to verify the evaluation setup.
+```mermaid
+flowchart LR
+    T[Issue and repository snapshot] --> A[Agent sandbox]
+    A --> P[Git patch]
+    P --> V[Fresh verification sandbox]
+    V --> H[Hidden tests]
+    H --> S[Resolved task score]
+```
+
+Key components are the YAML agent submission, harness-provided tools for repository work, isolated Docker sandboxes, and automated patch verification. The harness handles task setup and scoring; submissions provide the agent configuration and generated patches.
 
 ## Quick start
 
