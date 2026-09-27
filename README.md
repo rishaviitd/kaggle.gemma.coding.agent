@@ -37,6 +37,34 @@ Participants post-train Gemma 4 using approaches such as fine-tuning and reinfor
 
 The required base model is `gemma-4-31b-it-qat-w4a16-ct`. Submissions package an `agent.yaml` configuration with supporting prompts, tools, skills, and optional LoRA adapters in `submission.zip`.
 
+## Data
+
+The competition provides a public training/development set for agent training, prompt design, and local validation. During scoring, it is replaced by a hidden test set. Both sets use the same graph-generation methods and verification standards. See the [dataset description](context/data.md) for the full schema.
+
+### Training data
+
+The public set contains **129 Python bug-fixing and feature-request tasks** from `fastapi/fastapi`, `Textualize/rich`, `psf/requests`, and `encode/httpx`.
+
+| Asset | What it contains |
+| --- | --- |
+| `tasks.jsonl` | Task ID, repository, base commit, problem statement, optional hints, creation timestamp, reference solution (`patch`), and verification tests (`test_patch`). |
+| `snapshots/` | A Git repository archive for each task, frozen before the fix. Forward commit history is removed to prevent access to future solutions. |
+| `graphs/` | Python AST call and dependency graphs containing code symbols, source definitions, and relationships for structural navigation. |
+| `embeddings/` | 256-dimensional float32 vectors for code symbols, used for semantic code search. |
+| `wheels/` | Offline Python dependency wheels for installing and testing the repository without internet access. |
+| `docker/` and `sandbox/` | Container definitions, compatibility shims, and repository setup scripts for reproducible execution. |
+| `sample_submission/` and `HARNESS_README.md` | A baseline agent configuration and documentation for tools, submission format, and evaluation. |
+
+Reference fixes and verification tests are available for training and offline analysis. They must remain separate from the task input when measuring the agent's ability to solve an issue.
+
+### Test data
+
+The hidden test set contains **about 120 tasks from private repositories**, split approximately evenly between the public and private leaderboard evaluations. The public leaderboard split is still hidden from participants.
+
+At evaluation time, the agent receives the task description and repository context, with corresponding graph and embedding assets. **Reference solution patches are excluded from the test task records, and grading tests remain private.** The agent produces a unified Git diff; evaluation records each task ID and its predicted patch in `submission.parquet`.
+
+Tasks are verified by checking that the grading tests fail before the reference fix and pass after it. The competition score is the percentage of tasks resolved by the submitted agent's patches.
+
 ## What it does
 
 - Navigates code with file tools, repository graphs, and semantic search.
