@@ -29,13 +29,9 @@
 
 ## Overview
 
-The [Gemma 4 Developer Agent Competition](https://www.kaggle.com/competitions/gemma-4-developer-agent) challenges participants to turn an open model into an autonomous software engineering agent. The problem is to make smaller models reliable at multi-step coding tasks: understanding unfamiliar repositories, locating the cause of a reported issue, and producing a correct fix.
+The [Gemma 4 Developer Agent Competition](https://www.kaggle.com/competitions/gemma-4-developer-agent) aims to bring autonomous coding assistance to consumer hardware. Participants post-train Gemma 4 to understand unfamiliar repositories, diagnose software issues, and generate correct patches using fine-tuning, reinforcement learning, prompts, and tools. Code graphs and embeddings support repository navigation; scoring measures the percentage of issues resolved through validation tests.
 
-The motivation is to bring capable coding assistance to consumer hardware. Strong cloud-based agents depend on substantial compute and internet access, while smaller models still struggle to navigate large codebases and maintain useful reasoning across multiple tool calls.
-
-Participants post-train Gemma 4 using approaches such as fine-tuning and reinforcement learning, and design prompts, tools, and agent workflows around it. Repository graphs and code embeddings are available to support code comprehension. The agent must investigate real software issues and submit patches that pass validation tests; the score is the percentage of issues successfully resolved.
-
-The required base model is `gemma-4-31b-it-qat-w4a16-ct`. Submissions package an `agent.yaml` configuration with supporting prompts, tools, skills, and optional LoRA adapters in `submission.zip`.
+All agents must use `gemma-4-31b-it-qat-w4a16-ct`. Submissions include an `agent.yaml` configuration, supporting prompts, tools, skills, and optional LoRA adapters in `submission.zip`.
 
 ## Data
 
@@ -51,19 +47,14 @@ The public set contains **129 Python bug-fixing and feature-request tasks** from
 | `snapshots/` | A Git repository archive for each task, frozen before the fix. Forward commit history is removed to prevent access to future solutions. |
 | `graphs/` | Python AST call and dependency graphs containing code symbols, source definitions, and relationships for structural navigation. |
 | `embeddings/` | 256-dimensional float32 vectors for code symbols, used for semantic code search. |
-| `wheels/` | Offline Python dependency wheels for installing and testing the repository without internet access. |
-| `docker/` and `sandbox/` | Container definitions, compatibility shims, and repository setup scripts for reproducible execution. |
-| `sample_submission/` and `HARNESS_README.md` | A baseline agent configuration and documentation for tools, submission format, and evaluation. |
 
 Reference fixes and verification tests are available for training and offline analysis. They must remain separate from the task input when measuring the agent's ability to solve an issue.
 
 ### Test data
 
-The hidden test set contains **about 120 tasks from private repositories**, split approximately evenly between the public and private leaderboard evaluations. The public leaderboard split is still hidden from participants.
+The hidden test set contains **about 120 tasks from private repositories**, divided roughly equally between public and private leaderboard splits. Both splits remain hidden.
 
-At evaluation time, the agent receives the task description and repository context, with corresponding graph and embedding assets. **Reference solution patches are excluded from the test task records, and grading tests remain private.** The agent produces a unified Git diff; evaluation records each task ID and its predicted patch in `submission.parquet`.
-
-Tasks are verified by checking that the grading tests fail before the reference fix and pass after it. The competition score is the percentage of tasks resolved by the submitted agent's patches.
+Agents receive issue descriptions, repository context, graphs, and embeddings. **Reference fixes and grading tests are withheld.** Predicted Git patches are recorded in `submission.parquet` and scored by the percentage of tasks resolved. Grading tests are verified to fail before the reference fix and pass afterward.
 
 ## What it does
 
