@@ -56,18 +56,39 @@ The hidden test set has **about 120 tasks from private repositories**, split bet
 
 ## Harness
 
-The harness follows a SWE-bench-style, two-phase workflow: an agent investigates each task in an isolated workspace and submits a patch; a fresh sandbox applies that patch and runs hidden tests. The final score is the share of tasks whose tests pass.
+The competition harness compiles the YAML submission, provides repository tools to the agent, and verifies its patch in a fresh sandbox. The diagram below is reproduced from the [competition harness guide](context/harness.md).
 
 ```mermaid
-flowchart LR
-    T[Issue and repository snapshot] --> A[Agent sandbox]
-    A --> P[Git patch]
-    P --> V[Fresh verification sandbox]
-    V --> H[Hidden tests]
-    H --> S[Resolved task score]
-```
+flowchart TB
+    subgraph Submission["Competitor Submission (submission.zip / agent_dir)"]
+        YAML["agent.yaml + sub_agents/*.yaml"]
+        EvalCfg["eval_config.yaml (Optional Budgets)"]
+        Prompts["prompts/*.md, configs/*.yaml"]
+        Adapters["adapters/* (Optional LoRA / Weights)"]
+    end
 
-Key components are the YAML agent submission, harness-provided tools for repository work, isolated Docker sandboxes, and automated patch verification. The harness handles task setup and scoring; submissions provide the agent configuration and generated patches.
+    subgraph Host["Harness Process (swegemma + adk-submission + adk-eval-core)"]
+        Validator["validate_directory & validate_single_declared_model"]
+        Server["Local Inference Server (vLLM / Transformers :8000)"]
+        Compiler["compile_submission() -> ADK Runner"]
+        Tools["SwegemmaContext (9 Bound Tools + Budget Gate)"]
+    end
+
+    subgraph Sandboxes["Isolated Per-Task Sandboxes"]
+        ContA["Container A: Agent Sandbox (/workspace)\nSnapshot + Editable Install + Baseline Commit"]
+        ContB["Container B: Verification Sandbox (/workspace)\nFresh Snapshot + agent_patch + test_patch + pytest"]
+    end
+
+    Submission --> Validator
+    EvalCfg --> Host
+    Adapters --> Server
+    Validator --> Compiler
+    Server <-->|"OpenAI-compatible /v1 API"| Compiler
+    Compiler <-->|"Tool Calls & JSON Responses"| Tools
+    Tools <-->|"docker exec / subprocess"| ContA
+    ContA -->|"git add -N . && git diff --binary"| ContB
+    ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"]
+```
 
 ## Quick start
 
