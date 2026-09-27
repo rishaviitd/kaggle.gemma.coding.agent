@@ -142,11 +142,3 @@ Verify the setup using the reference patch:
 ├── wheelhouse/             Organizer wheels (ignored)
 └── results/                Patches, logs, traces, and results (ignored)
 ```
-
-## Evaluation
-
-The default pipeline targets `fastapi_11194` with a 50-tool-call budget and a 10-minute agent time limit. Results are written to `results/remote-baseline/`.
-
-Check `resolved` and the test output to determine whether a patch solved the task. A `SUCCESS` execution status alone does not mean the validation tests passed.
-
-No Kaggle leaderboard score is recorded in this repository yet.
