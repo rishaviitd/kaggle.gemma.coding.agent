@@ -103,6 +103,8 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 | `search_similar_code` | Find semantically similar code. |
 | `get_code_subgraph` | Inspect relationships among code symbols. |
 
+![Competition tool usage diagram](assets/tool.usage.png)
+
 ## Quick start
 
 Follow [SETUP.md](SETUP.md) to restore Python dependencies, obtain the task assets, and build the Docker sandbox. Organizer wheels and datasets are required and are excluded from Git.
