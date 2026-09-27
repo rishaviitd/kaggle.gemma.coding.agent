@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://www.kaggle.com/competitions/149921/images/header" alt="Gemma 4 Developer Agent Competition banner" width="100%">
+  <img src="assets/header.png" alt="Gemma 4 Developer Agent Competition banner" width="100%">
 </p>
 
 <h1 align="center">Kaggle Gemma Developer Agent</h1>
