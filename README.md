@@ -27,6 +27,16 @@
   <img src="https://img.shields.io/badge/Kaggle-Competition-20BEFF?logo=kaggle&logoColor=white" alt="Kaggle competition">
 </p>
 
+## Overview
+
+The [Gemma 4 Developer Agent Competition](https://www.kaggle.com/competitions/gemma-4-developer-agent) challenges participants to turn an open model into an autonomous software engineering agent. The problem is to make smaller models reliable at multi-step coding tasks: understanding unfamiliar repositories, locating the cause of a reported issue, and producing a correct fix.
+
+The motivation is to bring capable coding assistance to consumer hardware. Strong cloud-based agents depend on substantial compute and internet access, while smaller models still struggle to navigate large codebases and maintain useful reasoning across multiple tool calls.
+
+Participants post-train Gemma 4 using approaches such as fine-tuning and reinforcement learning, and design prompts, tools, and agent workflows around it. Repository graphs and code embeddings are available to support code comprehension. The agent must investigate real software issues and submit patches that pass validation tests; the score is the percentage of issues successfully resolved.
+
+The required base model is `gemma-4-31b-it-qat-w4a16-ct`. Submissions package an `agent.yaml` configuration with supporting prompts, tools, skills, and optional LoRA adapters in `submission.zip`.
+
 ## What it does
 
 - Navigates code with file tools, repository graphs, and semantic search.
