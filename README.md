@@ -14,7 +14,7 @@
 
 <p align="center">
   <a href="https://www.kaggle.com/competitions/gemma-4-developer-agent">Competition</a> ·
-  <a href="#quick-start">Quick start</a>
+  <a href="#how-to-run">How to run</a>
 </p>
 
 <p align="center">
@@ -105,7 +105,7 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 
 ![Competition tool usage diagram](assets/tool.usage.png)
 
-## Quick start
+## How to run
 
 Python 3.12 is required. Restore the environment from the lockfile:
 
