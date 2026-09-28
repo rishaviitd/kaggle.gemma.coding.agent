@@ -37,8 +37,8 @@
     );
 
     return h(window.SlideLayout, {
-      eyebrow: "Task understanding",
-      title: "From issue to verified patch",
+      eyebrow: "Overview",
+      title: "Coding Agent Workflow",
       content,
       number,
       total
