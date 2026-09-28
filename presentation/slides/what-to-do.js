@@ -1,10 +1,9 @@
 (() => {
   const h = React.createElement;
-  const tools = ["read_file", "get_code_neighbors", "search_similar_code", "edit_file", "run_command", "submit_patch"];
 
-  function StepCard({ title, children }) {
-    return h("section", { className: "workflow__card" },
-      h("h3", null, title),
+  function Phase({ number, title, children }) {
+    return h("section", { className: "workflow__phase" },
+      h("h3", null, h("span", { className: "workflow__number" }, number), title),
       children
     );
   }
@@ -15,19 +14,22 @@
         h("span", { className: "workflow__label" }, "RUN"),
         h("code", null, ".venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 --api-base <vLLM_URL> --model gemma4")
       ),
-      h("div", { className: "workflow__steps" },
-        h(StepCard, { title: "Inputs" },
-          h("p", null, "Gemma 4 model + issue"),
-          h("p", null, "Repository snapshot"),
-          h("p", null, "AST graph + embeddings + wheels")
+      h("div", { className: "workflow__phases" },
+        h(Phase, { number: "01", title: "Patch generation" },
+          h("p", null, "Gemma 4 works from the issue and repository snapshot; AST graph + embeddings power code search."),
+          h("div", { className: "workflow__sequence" },
+            h("code", null, "read_file → get_code_neighbors → search_similar_code"),
+            h("span", { className: "workflow__ellipsis" }, "…"),
+            h("code", null, "edit_file → run_command → submit_patch")
+          ),
+          h("p", { className: "workflow__note" }, "The harness captures the submitted patch as agent_patch.")
         ),
-        h("span", { className: "workflow__arrow", "aria-hidden": "true" }, "→"),
-        h(StepCard, { title: "Agent tool calls" },
-          h("div", { className: "workflow__tools" }, tools.map((tool) => h("code", { key: tool }, tool)))
-        ),
-        h("span", { className: "workflow__arrow", "aria-hidden": "true" }, "→"),
-        h(StepCard, { title: "Tested output" },
-          h("p", null, "Patch verified in sandbox"),
+        h(Phase, { number: "02", title: "Patch evaluation" },
+          h("div", { className: "workflow__sequence" },
+            h("code", null, "Fresh sandbox → apply agent_patch → reset protected tests → apply test_patch → pytest + JUnit")
+          ),
+          h("p", null, "Pass when pytest succeeds and the JUnit report validates."),
+          h("p", { className: "workflow__note" }, "Result: resolved / not resolved · resolution rate"),
           h("code", { className: "workflow__path" }, "results/remote-baseline/fastapi_11194.patch"),
           h("code", { className: "workflow__path" }, "results/remote-baseline/fastapi_11194.json")
         )
