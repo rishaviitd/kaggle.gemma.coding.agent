@@ -13,9 +13,9 @@
 </p>
 
 <p align="center">
-  <a href="https://rishaviitd.github.io/kaggle.gemma.coding.agent/">📊 View presentation</a> ·
   <a href="https://www.kaggle.com/competitions/gemma-4-developer-agent">Competition</a> ·
-  <a href="#how-to-run">How to run</a>
+  <a href="#how-to-run">How to run</a> ·
+  <a href="https://rishaviitd.github.io/kaggle.gemma.coding.agent/">Presentation</a>
 </p>
 
 <p align="center">
