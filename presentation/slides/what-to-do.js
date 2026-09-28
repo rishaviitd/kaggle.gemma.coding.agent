@@ -31,8 +31,8 @@
         h("code", null, ".venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 --api-base <vLLM_URL> --model gemma4")
       ),
       h("div", { className: "workflow__legend" },
-        h(InputBadge, { className: "flow__badge--tune" }, "Optional fine-tuning target"),
-        h(InputBadge, { className: "flow__badge--fixed" }, "No model fine-tuning")
+        h(InputBadge, { className: "flow__badge--editable" }, "Editable / configurable"),
+        h(InputBadge, { className: "flow__badge--fixed" }, "Fixed task / model inputs")
       ),
       h("div", { className: "workflow__phases" },
         h(Phase, {
@@ -44,7 +44,8 @@
             content: h(React.Fragment, null,
               h("div", { className: "flow__badges" },
                 h(InputBadge, { className: "flow__badge--fixed" }, "Gemma 4 base"),
-                h(InputBadge, { className: "flow__badge--fixed" }, "Issue + repo snapshot"),
+                h(InputBadge, { className: "flow__badge--fixed" }, "Task issue"),
+                h(InputBadge, { className: "flow__badge--fixed" }, "Repo snapshot"),
                 h(InputBadge, { className: "flow__badge--fixed" }, "AST graph"),
                 h(InputBadge, { className: "flow__badge--fixed" }, "Embeddings")
               )
@@ -54,15 +55,15 @@
             title: "Agent settings + adapters",
             content: h(React.Fragment, null,
               h("div", { className: "flow__badges" },
-                h(InputBadge, { className: "flow__badge--fixed" }, "src/agent.yaml · required"),
-                h(InputBadge, { className: "flow__badge--fixed" }, "system.md · analyzer.md"),
-                h(InputBadge, { className: "flow__badge--fixed" }, "code_analyzer.yaml"),
-                h(InputBadge, { className: "flow__badge--fixed" }, "sampling.yaml · optional"),
-                h(InputBadge, { className: "flow__badge--fixed" }, "eval_config.yaml · optional"),
-                h(InputBadge, { className: "flow__badge--tune" }, "main_lora · optional"),
-                h(InputBadge, { className: "flow__badge--tune" }, "tool_lora · optional")
+                h(InputBadge, { className: "flow__badge--editable" }, "src/agent.yaml · required"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/prompts/system.md"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/prompts/analyzer.md"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/sub_agents/code_analyzer.yaml"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/configs/sampling.yaml · optional"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/eval_config.yaml · optional"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/adapters/main_lora/ · optional"),
+                h(InputBadge, { className: "flow__badge--editable" }, "src/adapters/tool_lora/ · optional")
               ),
-              h("p", { className: "flow__input-paths" }, "src/prompts/ · src/sub_agents/ · src/configs/ · src/adapters/")
             )
           },
           {
