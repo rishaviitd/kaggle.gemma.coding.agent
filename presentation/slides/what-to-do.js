@@ -11,7 +11,7 @@
   function Phase({ number, title, nodes }) {
     const steps = [];
     nodes.forEach((node, index) => {
-      if (index) steps.push(h("span", { className: "flow__arrow", key: `arrow-${index}`, "aria-hidden": "true" }, "→"));
+      if (index) steps.push(h("span", { className: "flow__arrow", key: `arrow-${index}`, "aria-hidden": "true" }, "↓"));
       steps.push(h(FlowNode, { title: node.title, key: node.title }, node.content));
     });
     return h("section", { className: "flow__phase" },
@@ -26,7 +26,8 @@
         h("span", { className: "workflow__label" }, "RUN"),
         h("code", null, ".venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 --api-base <vLLM_URL> --model gemma4")
       ),
-      h(Phase, {
+      h("div", { className: "workflow__phases" },
+        h(Phase, {
         number: "01",
         title: "Patch generation",
         nodes: [
@@ -50,8 +51,8 @@
             content: h("code", { className: "flow__tool-sequence" }, "submit_patch → agent_patch")
           }
         ]
-      }),
-      h(Phase, {
+        }),
+        h(Phase, {
         number: "02",
         title: "Patch evaluation",
         nodes: [
@@ -75,7 +76,8 @@
             )
           }
         ]
-      })
+        })
+      )
     );
 
     return h(window.SlideLayout, {
