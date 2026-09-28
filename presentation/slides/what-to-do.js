@@ -20,11 +20,19 @@
     );
   }
 
+  function InputBadge({ className, children }) {
+    return h("span", { className: `flow__badge ${className}` }, children);
+  }
+
   window.WhatToDoSlide = function WhatToDoSlide({ number, total }) {
     const content = h("div", { className: "workflow" },
       h("div", { className: "workflow__command" },
         h("span", { className: "workflow__label" }, "RUN"),
         h("code", null, ".venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 --api-base <vLLM_URL> --model gemma4")
+      ),
+      h("div", { className: "workflow__legend" },
+        h(InputBadge, { className: "flow__badge--tune" }, "Fine-tune for task"),
+        h(InputBadge, { className: "flow__badge--fixed" }, "Use as-is")
       ),
       h("div", { className: "workflow__phases" },
         h(Phase, {
@@ -33,7 +41,16 @@
         nodes: [
           {
             title: "Inputs",
-            content: h("p", null, "Issue + repo snapshot; AST graph and embeddings support code search.")
+            content: h(React.Fragment, null,
+              h("div", { className: "flow__badges" },
+                h(InputBadge, { className: "flow__badge--fixed" }, "Gemma 4 base"),
+                h(InputBadge, { className: "flow__badge--fixed" }, "Issue + repo snapshot"),
+                h(InputBadge, { className: "flow__badge--fixed" }, "AST graph + embeddings"),
+                h(InputBadge, { className: "flow__badge--tune" }, "Main LoRA adapter"),
+                h(InputBadge, { className: "flow__badge--tune" }, "Tool LoRA adapter")
+              ),
+              h("p", { className: "flow__input-paths" }, "src/adapters/main_lora/ · src/adapters/tool_lora/")
+            )
           },
           {
             title: "Gemma 4 + prompts",
