@@ -198,7 +198,6 @@ python3 scripts/run_kaggle_notebook.py --follow-only
 │   ├── evaluate.py         Evaluation and reference checks
 │   └── run_kaggle_notebook.py  Push notebook and poll Kaggle status/logs
 ├── notebooks/              Kaggle notebook and account-specific metadata
-├── notebooks/              Kaggle notebook and account-specific metadata
 ├── context/                Competition and harness notes
 ├── requirements.lock.txt   Python dependencies
 ├── data/                   Local task assets (ignored)
