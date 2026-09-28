@@ -17,6 +17,8 @@
       h("div", { className: "workflow__phases" },
         h(Phase, { number: "01", title: "Patch generation" },
           h("p", null, "Gemma 4 works from the issue and repository snapshot; AST graph + embeddings power code search."),
+          h("p", null, "Setup: src/agent.yaml · system prompt: src/prompts/system.md · analyzer prompt: src/prompts/analyzer.md (src/sub_agents/code_analyzer.yaml)."),
+          h("p", null, "Tool calls run through the harness in Container A (/workspace)."),
           h("div", { className: "workflow__sequence" },
             h("code", null, "read_file → get_code_neighbors → search_similar_code"),
             h("span", { className: "workflow__ellipsis" }, "…"),
