@@ -13,6 +13,7 @@
 </p>
 
 <p align="center">
+  <a href="https://rishaviitd.github.io/kaggle.gemma.coding.agent/">📊 View presentation</a> ·
   <a href="https://www.kaggle.com/competitions/gemma-4-developer-agent">Competition</a> ·
   <a href="#how-to-run">How to run</a>
 </p>
@@ -107,7 +108,24 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 
 ## How to run
 
-Python 3.12 is required. Restore the environment from the lockfile:
+### Requirements
+
+- Python 3 and [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed (`uvx` supplies the Kaggle CLI automatically).
+- A Kaggle account with the competition rules accepted and access to the Gemma 4 model and wheelhouse dataset.
+- A Kaggle API token available as `KAGGLE_API_TOKEN` in the root `.env` file or shell environment.
+- In `notebooks/kernel-metadata.json`, set `id` to your Kaggle username and a notebook slug, such as `your-kaggle-name/gemma-agent-run`. Keep `machine_shape` set to `NvidiaL4`; the run uses Kaggle's L4 x4 competition accelerator with notebook internet disabled.
+
+Create the ignored root `.env` file with your own token:
+
+```dotenv
+KAGGLE_API_TOKEN=your-kaggle-api-token
+```
+
+The launcher fetches Kaggle CLI 2.2.4 with `uvx`, so you do not need to install the CLI into the project virtual environment. Your local machine needs internet to contact Kaggle; the notebook run itself has internet disabled.
+
+### Install the project environment
+
+Python 3.12 is needed for local evaluation. Restore the environment from the lockfile:
 
 ```bash
 uv venv --python 3.12 .venv
@@ -157,13 +175,30 @@ Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 
 It checks tool calling before starting, runs workspaces and verification locally in Docker, and saves patches, logs, traces, and results under `results/remote-baseline/`. Defaults allow 50 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
 
+### Launch the Kaggle notebook and follow logs
+
+From the repository root, push and monitor the offline competition notebook:
+
+```bash
+python3 scripts/run_kaggle_notebook.py
+```
+
+The launcher reports queued status every 10 seconds, then polls and prints new logs after the run starts. To monitor the latest run without launching another version:
+
+```bash
+python3 scripts/run_kaggle_notebook.py --follow-only
+```
+
 ## Project structure
 
 ```text
 ├── src/                    Agent configuration, prompts, and tool reference code
 ├── scripts/
 │   ├── task_pipeline.py    Remote base-model task runner
-│   └── evaluate.py         Evaluation and reference checks
+│   ├── evaluate.py         Evaluation and reference checks
+│   └── run_kaggle_notebook.py  Push notebook and poll Kaggle status/logs
+├── notebooks/              Kaggle notebook and account-specific metadata
+├── notebooks/              Kaggle notebook and account-specific metadata
 ├── context/                Competition and harness notes
 ├── requirements.lock.txt   Python dependencies
 ├── data/                   Local task assets (ignored)
