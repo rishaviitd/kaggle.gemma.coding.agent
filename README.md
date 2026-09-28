@@ -103,6 +103,10 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 | `get_code_neighbors` | Find related symbols and callers. |
 | `search_similar_code` | Find semantically similar code. |
 | `get_code_subgraph` | Inspect relationships among code symbols. |
+| `load_skill_resource` | Read a knowledge file from a skill attached to the agent. |
+| `run_skill_script` | Run an attached skill's script inside the task sandbox. |
+
+Skill tools are available when skills are declared in the agent YAML; this repository does not currently configure any skills.
 
 ![Competition tool usage diagram](assets/tool.usage.png)
 
@@ -139,6 +143,31 @@ docker build --platform linux/amd64 -t swebench-sandbox:latest -f data/docker/Do
 ```
 
 The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. Only the `fastapi_11194` snapshot, graph, and embeddings are currently available locally.
+
+### Prepare offline wheels for another task
+
+Each task can require different package versions. Download its repository snapshot, extract it, then build a task-specific wheel cache. Generate Linux wheels compatible with the sandbox (Python 3.12, `linux/amd64`); do not use macOS-only wheels.
+
+```bash
+TASK_ID=your_task_id
+mkdir -p "/tmp/$TASK_ID" "data/wheels-$TASK_ID"
+tar -xzf "data/snapshots/$TASK_ID.tgz" -C "/tmp/$TASK_ID"
+
+python -m pip download \
+  --dest "data/wheels-$TASK_ID" \
+  "/tmp/$TASK_ID[standard]" \
+  -r "/tmp/$TASK_ID/requirements-tests.txt"
+```
+
+Use that cache when running the task:
+
+```bash
+.venv/bin/python scripts/task_pipeline.py --task-id "$TASK_ID" \
+  --snapshot "data/snapshots/$TASK_ID.tgz" \
+  --wheels "data/wheels-$TASK_ID"
+```
+
+Share or commit the generated `data/wheels-$TASK_ID/` directory with teammates so their isolated Docker runs can install dependencies without internet access.
 
 ### Verify the reference fix
 

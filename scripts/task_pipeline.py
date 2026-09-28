@@ -29,7 +29,7 @@ def arguments():
     p.add_argument('--wheels', type=Path, default=ROOT / 'data/wheels-fastapi-11194')
     p.add_argument('--submission', type=Path, default=ROOT / 'src')
     p.add_argument('--results', type=Path, default=ROOT / 'results/remote-baseline')
-    p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1'))
+    p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/chat/completions'))
     p.add_argument('--model', default='gemma4')
     p.add_argument('--max-tool-calls', type=int, default=50)
     p.add_argument('--max-minutes', type=float, default=10)
