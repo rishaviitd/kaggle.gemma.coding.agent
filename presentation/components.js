@@ -8,7 +8,11 @@
         h("h1", { className: "slide__title" }, title),
         h("hr", { className: "slide__rule" }),
         content || h("section", { className: "slide__panel" },
-          h("ol", { className: "slide__points" }, points.map((point) => h("li", { key: point }, point)))
+          h("ol", { className: "slide__points" }, points.map((point) => {
+            const text = typeof point === "string" ? point : point.text;
+            const hint = typeof point === "string" ? null : point.hint;
+            return h("li", { key: text }, text, hint && h("span", { className: "slide__hint" }, hint));
+          }))
         ),
         h("footer", { className: "slide__footer" },
           h("span", null, "GEMMA 4 · DEVELOPER AGENT"),
