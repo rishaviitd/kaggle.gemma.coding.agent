@@ -12,7 +12,7 @@ Execute a shell command inside the repository sandbox.
 
         Args:
             command: Shell command to execute (e.g., "pytest tests/", "python3 script.py").
-        
+
 ```
 
 Parameters sent:
@@ -25,9 +25,7 @@ Parameters sent:
       "type": "string"
     }
   },
-  "required": [
-    "command"
-  ]
+  "required": ["command"]
 }
 ```
 
@@ -47,7 +45,7 @@ Read the contents of a file from the repository workspace.
 
         Returns:
             JSON string containing file content, line range, and truncation status.
-        
+
 ```
 
 Parameters sent:
@@ -82,9 +80,7 @@ Parameters sent:
       "nullable": true
     }
   },
-  "required": [
-    "filepath"
-  ]
+  "required": ["filepath"]
 }
 ```
 
@@ -104,7 +100,7 @@ Replace a contiguous block of text in an existing file.
 
         Returns:
             JSON string containing file status, occurrences count, match strategy, and unified diff.
-        
+
 ```
 
 Parameters sent:
@@ -127,11 +123,7 @@ Parameters sent:
       "type": "boolean"
     }
   },
-  "required": [
-    "filepath",
-    "old_string",
-    "new_string"
-  ]
+  "required": ["filepath", "old_string", "new_string"]
 }
 ```
 
@@ -143,7 +135,7 @@ Create or overwrite a file in the workspace.
         Args:
             filepath: Relative path to the file to create or overwrite.
             content: Full content of the file.
-        
+
 ```
 
 Parameters sent:
@@ -159,10 +151,7 @@ Parameters sent:
       "type": "string"
     }
   },
-  "required": [
-    "filepath",
-    "content"
-  ]
+  "required": ["filepath", "content"]
 }
 ```
 
@@ -188,7 +177,7 @@ Capture the current working tree modifications as the agent's submission.
 
         This generates a unified git diff against the baseline commit. The agent
         can submit multiple times; only the final submission is evaluated.
-        
+
 ```
 
 Parameters sent:
@@ -212,7 +201,7 @@ Discover structural code graph neighbors (callers, callees, definitions) for a g
 
         Returns:
             JSON string with list of neighbor node names and count.
-        
+
 ```
 
 Parameters sent:
@@ -240,9 +229,7 @@ Parameters sent:
       "type": "integer"
     }
   },
-  "required": [
-    "node"
-  ]
+  "required": ["node"]
 }
 ```
 
@@ -257,7 +244,7 @@ Find semantically similar code functions and classes using graph vector embeddin
 
         Returns:
             JSON string containing matching node names, code snippets, and similarity scores.
-        
+
 ```
 
 Parameters sent:
@@ -274,9 +261,7 @@ Parameters sent:
       "type": "integer"
     }
   },
-  "required": [
-    "query"
-  ]
+  "required": ["query"]
 }
 ```
 
@@ -290,7 +275,7 @@ Extract the relationship graph (nodes and connecting edges) for a focal set of c
 
         Returns:
             JSON string detailing the subgraph nodes and connecting directed edges.
-        
+
 ```
 
 Parameters sent:
@@ -306,9 +291,7 @@ Parameters sent:
       "type": "array"
     }
   },
-  "required": [
-    "nodes"
-  ]
+  "required": ["nodes"]
 }
 ```
 
@@ -328,9 +311,7 @@ Parameters sent:
       "type": "string"
     }
   },
-  "required": [
-    "request"
-  ]
+  "required": ["request"]
 }
 ```
 
@@ -366,9 +347,7 @@ Parameters sent:
       "description": "The name of the skill to load."
     }
   },
-  "required": [
-    "skill_name"
-  ]
+  "required": ["skill_name"]
 }
 ```
 
@@ -393,10 +372,7 @@ Parameters sent:
       "description": "The relative path to the resource (e.g., 'references/my_doc.md', 'assets/template.txt', or 'scripts/setup.sh')."
     }
   },
-  "required": [
-    "skill_name",
-    "file_path"
-  ]
+  "required": ["skill_name", "file_path"]
 }
 ```
 
@@ -446,9 +422,11 @@ Parameters sent:
       "description": "Optional positional arguments to pass to the script. Must not be provided if 'args' is a list."
     }
   },
-  "required": [
-    "skill_name",
-    "file_path"
-  ]
+  "required": ["skill_name", "file_path"]
 }
 ```
+
+regex maching for the search similar query
+
+Matching precedence: 1. Exact match (e.g. 'fastapi.applications.FastAPI') 2. Suffix match on delimiter boundary (e.g. '.FastAPI' or ';FastAPI') 3. Case-insensitive exact / boundary match 4. Substring containment match
+"""
