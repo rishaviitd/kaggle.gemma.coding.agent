@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task-id', default='fastapi_9753')
+    parser.add_argument('--task-id', default='fastapi_11194')
     parser.add_argument('--reference-check', action='store_true')
     args = parser.parse_args()
     os.chdir(ROOT)
@@ -27,7 +27,7 @@ async def main():
         results_dir=ROOT / 'results' / ('reference' if args.reference_check else 'baseline'),
         graph_dir=str(ROOT / 'data/graph'),
         embeddings_dir=str(ROOT / 'data/embeddings'),
-        wheels_dir=ROOT / 'data/wheels-fastapi-9753',
+        wheels_dir=ROOT / 'data/wheels-fastapi-11194',
         models=setup_gemma_model_registry(),
         task_ids=[args.task_id],
         sandbox='docker',

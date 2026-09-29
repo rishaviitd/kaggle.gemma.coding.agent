@@ -24,12 +24,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def arguments():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--task-id', default='fastapi_9753')
+    p.add_argument('--task-id', default='fastapi_11194')
     p.add_argument('--tasks', type=Path, default=ROOT / 'data/tasks.jsonl')
-    p.add_argument('--snapshot', type=Path, default=ROOT / 'data/snapshots/fastapi_9753.tgz')
-    p.add_argument('--graph', type=Path, default=ROOT / 'data/graph/fastapi_aee8e78078e8a7f2736d3cab7a1cb7197356951c.json')
-    p.add_argument('--embeddings', type=Path, default=ROOT / 'data/embeddings/fastapi_aee8e78078e8a7f2736d3cab7a1cb7197356951c.npz')
-    p.add_argument('--wheels', type=Path, default=ROOT / 'data/wheels-fastapi-9753')
+    p.add_argument('--snapshot', type=Path, default=ROOT / 'data/snapshots/fastapi_11194.tgz')
+    p.add_argument('--graph', type=Path, default=ROOT / 'data/graph/fastapi_a7f2dbe976bf72703376f0cd04487bfc4a849f83.json')
+    p.add_argument('--embeddings', type=Path, default=ROOT / 'data/embeddings/fastapi_a7f2dbe976bf72703376f0cd04487bfc4a849f83.npz')
+    p.add_argument('--wheels', type=Path, default=ROOT / 'data/wheels-fastapi-11194')
     p.add_argument('--submission', type=Path, default=ROOT / 'src')
     p.add_argument('--results', type=Path, default=ROOT / 'results/remote-baseline')
     p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/chat/completions'))

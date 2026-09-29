@@ -154,7 +154,7 @@ Start Docker Desktop and build the sandbox image:
 docker build --platform linux/amd64 -t swebench-sandbox:latest -f data/docker/Dockerfile.sandbox data/docker
 ```
 
-The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. The checked local setup currently targets `fastapi_9753`.
+The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. The checked local setup currently targets `fastapi_11194`.
 
 ### Prepare offline wheels for another task
 
@@ -197,7 +197,7 @@ The local inference server must expose the competition model and support automat
 LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/evaluate.py
 ```
 
-This runner uses `fastapi_9753`, allows 50 tool calls and 30 minutes, and writes to `results/baseline/`. Reference patches are used only with `--reference-check`.
+This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes to `results/baseline/`. Reference patches are used only with `--reference-check`.
 
 ### Run with a remote vLLM server
 
@@ -210,7 +210,7 @@ VLLM_API_KEY=your-key-here
 Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --task-id fastapi_9753 \
+.venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 \
   --api-base https://your-model-server/v1 --model gemma4
 ```
 
