@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from langfuse import get_client, propagate_attributes
+from langfuse import Langfuse, propagate_attributes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -584,7 +584,7 @@ def main() -> None:
     if not args.artifact_dir.is_dir():
         raise FileNotFoundError(f"Artifact directory not found: {args.artifact_dir}")
 
-    client = get_client()
+    client = Langfuse(timeout=60)
     if not client.auth_check():
         raise SystemExit("Langfuse authentication failed")
 
