@@ -117,15 +117,27 @@ Skill tools are available when skills are declared in the agent YAML; this repos
 - Python 3 and [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed (`uvx` supplies the Kaggle CLI automatically).
 - A Kaggle account with the competition rules accepted and access to the Gemma 4 model and wheelhouse dataset.
 - A Kaggle API token available as `KAGGLE_API_TOKEN` in the root `.env` file or shell environment.
+- A Langfuse project if you want automatic post-run trace upload. Langfuse runs locally after evaluation; the Kaggle notebook remains offline.
 - In `notebooks/kernel-metadata.json`, set `id` to your Kaggle username and a notebook slug, such as `your-kaggle-name/gemma-agent-run`. Keep `machine_shape` set to `NvidiaL4`; the run uses Kaggle's L4 x4 competition accelerator with notebook internet disabled.
 
-Create the ignored root `.env` file with your own token:
+Copy the environment template and fill in the services you use:
 
-```dotenv
-KAGGLE_API_TOKEN=your-kaggle-api-token
+```bash
+cp .env.example .env
 ```
 
-The launcher fetches Kaggle CLI 2.2.4 with `uvx`, so you do not need to install the CLI into the project virtual environment. Your local machine needs internet to contact Kaggle; the notebook run itself has internet disabled.
+```dotenv
+KAGGLE_API_TOKEN="your-kaggle-api-token"
+VLLM_API_KEY="your-vllm-key"
+
+LANGFUSE_PUBLIC_KEY="pk-lf-your-public-key"
+LANGFUSE_SECRET_KEY="sk-lf-your-secret-key"
+LANGFUSE_BASE_URL="https://us.cloud.langfuse.com"
+```
+
+Use the Langfuse base URL for your project region. The launchers detect whether all three Langfuse settings are present. When they are absent, evaluation still runs and trace upload is skipped with a message.
+
+The launchers fetch Kaggle CLI 2.2.4 with `uvx`, and the post-run importer runs Langfuse 4.x in an isolated `uv` environment. You do not need either package in the project virtual environment. Your local machine needs internet to contact Kaggle and Langfuse; the notebook run itself has internet disabled.
 
 ### Install the project environment
 
@@ -142,7 +154,7 @@ Start Docker Desktop and build the sandbox image:
 docker build --platform linux/amd64 -t swebench-sandbox:latest -f data/docker/Dockerfile.sandbox data/docker
 ```
 
-The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. Only the `fastapi_11194` snapshot, graph, and embeddings are currently available locally.
+The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. The checked local setup currently targets `fastapi_9753`.
 
 ### Prepare offline wheels for another task
 
@@ -185,7 +197,7 @@ The local inference server must expose the competition model and support automat
 LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/evaluate.py
 ```
 
-This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes to `results/baseline/`. Reference patches are used only with `--reference-check`.
+This runner uses `fastapi_9753`, allows 50 tool calls and 30 minutes, and writes to `results/baseline/`. Reference patches are used only with `--reference-check`.
 
 ### Run with a remote vLLM server
 
@@ -198,13 +210,15 @@ VLLM_API_KEY=your-key-here
 Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 \
+.venv/bin/python scripts/task_pipeline.py --task-id fastapi_9753 \
   --api-base https://your-model-server/v1 --model gemma4
 ```
 
-It checks tool calling before starting, runs workspaces and verification locally in Docker, and saves patches, logs, traces, and results under `results/remote-baseline/`. Defaults allow 50 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
+It checks tool calling before starting, runs workspaces and verification locally in Docker, and saves patches, logs, traces, and results under `results/remote-baseline/`. If Langfuse is configured, the completed task trace and evaluation result are uploaded automatically in a new `vllm-<task>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
 
-### Launch the Kaggle notebook and follow logs
+Defaults allow 50 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
+
+### Launch Kaggle, download its output, and upload its trace
 
 From the repository root, push and monitor the offline competition notebook:
 
@@ -212,11 +226,39 @@ From the repository root, push and monitor the offline competition notebook:
 python3 scripts/run_kaggle_notebook.py
 ```
 
-The launcher reports queued status every 10 seconds, then polls and prints new logs after the run starts. To monitor the latest run without launching another version:
+When the Langfuse settings are configured, the command performs the full chain:
+
+1. Push the notebook with GPU enabled and internet disabled.
+2. Follow its status and console output until the run reaches a terminal state.
+3. Download the latest notebook output to a new directory under `/tmp`.
+4. Validate and stitch its ATIF files into one Langfuse trace.
+5. Assign a content-derived session ID so the same output cannot be imported silently twice.
+
+To follow and import the latest existing run without launching another version:
 
 ```bash
 python3 scripts/run_kaggle_notebook.py --follow-only
 ```
+
+Use `--skip-langfuse` to stop after monitoring, or `--langfuse-session-id ID` to override the generated session ID. Kaggle CLI downloads the latest run for the notebook handle. To import an already downloaded historical version, use its artifact directory directly:
+
+```bash
+uv run --with 'langfuse>=4,<5' --python 3.12 \
+  python scripts/stitch_langfuse_trace.py \
+  --artifact-dir /tmp/kaggle-run-output-353660769
+```
+
+You can also download and import the latest Kaggle output without launching or following the notebook:
+
+```bash
+uv run --with 'langfuse>=4,<5' --python 3.12 \
+  python scripts/stitch_langfuse_trace.py \
+  --kaggle-kernel your-kaggle-name/gemma-agent-run
+```
+
+Console logs are used locally to recover task outcomes but are not uploaded as Langfuse observations by default. Add `--include-console-log` only when the complete notebook log is useful for debugging. In Langfuse's Tracing table, filter `Is Root Observation` to `True` to show one row per run; open that row to inspect the nested agent steps and tool calls.
+
+The automatic download covers the completed notebook's output artifacts and log. Kaggle attaches the competition data, wheelhouse, and Gemma model to the notebook from `competition_sources`, `dataset_sources`, and `model_sources` in `notebooks/kernel-metadata.json`; those inputs are not copied to your computer. The local vLLM path uses the task snapshot, graph, embeddings, and wheels already under `data/`.
 
 ## Project structure
 
@@ -225,7 +267,9 @@ python3 scripts/run_kaggle_notebook.py --follow-only
 ├── scripts/
 │   ├── task_pipeline.py    Remote base-model task runner
 │   ├── evaluate.py         Evaluation and reference checks
-│   └── run_kaggle_notebook.py  Push notebook and poll Kaggle status/logs
+│   ├── run_kaggle_notebook.py  Push, follow, download, and import a Kaggle run
+│   ├── langfuse_bridge.py   Shared automatic post-run upload hook
+│   └── stitch_langfuse_trace.py  Validate and import local/Kaggle ATIF artifacts
 ├── notebooks/              Kaggle notebook and account-specific metadata
 ├── context/                Competition and harness notes
 ├── requirements.lock.txt   Python dependencies

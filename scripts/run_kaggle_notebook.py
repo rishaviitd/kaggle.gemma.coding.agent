@@ -7,6 +7,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from langfuse_bridge import push_to_langfuse
+
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_DIR = ROOT / "notebooks"
 METADATA = NOTEBOOK_DIR / "kernel-metadata.json"
@@ -73,7 +75,7 @@ def poll_run(kernel, env, interval):
             print(f"Log fetch failed; retrying in {interval}s.", flush=True)
 
         if status in terminal:
-            break
+            return status
         time.sleep(interval)
 
 
@@ -82,6 +84,15 @@ def main():
     parser.add_argument("--follow-only", action="store_true", help="Follow a run without pushing a new notebook version.")
     parser.add_argument("--kernel", help="Kaggle kernel handle; defaults to notebooks/kernel-metadata.json.")
     parser.add_argument("--interval", type=int, default=10, help="Live log polling interval in seconds.")
+    parser.add_argument(
+        "--skip-langfuse",
+        action="store_true",
+        help="Do not download and upload the completed run when Langfuse is configured.",
+    )
+    parser.add_argument(
+        "--langfuse-session-id",
+        help="Override the content-derived Langfuse session ID for this Kaggle run.",
+    )
     args = parser.parse_args()
 
     env = os.environ.copy()
@@ -110,7 +121,14 @@ def main():
             kernel = match.group(1).rstrip(".,")
             print(f"Following Kaggle run: {kernel}", flush=True)
 
-    poll_run(kernel, env, args.interval)
+    final_status = poll_run(kernel, env, args.interval)
+    print(f"Kaggle run finished with status {final_status}.", flush=True)
+    if not args.skip_langfuse:
+        push_to_langfuse(
+            kaggle_kernel=kernel,
+            session_id=args.langfuse_session_id,
+            source_platform="kaggle",
+        )
 
 
 if __name__ == "__main__":

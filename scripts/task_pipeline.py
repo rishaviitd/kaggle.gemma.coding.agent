@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,17 +17,19 @@ from swegemma.config import EvalConfig
 from swegemma.evaluate import Evaluator
 from swegemma.models import load_tasks, setup_gemma_model_registry
 
+from langfuse_bridge import push_to_langfuse
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def arguments():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--task-id', default='fastapi_11194')
+    p.add_argument('--task-id', default='fastapi_9753')
     p.add_argument('--tasks', type=Path, default=ROOT / 'data/tasks.jsonl')
-    p.add_argument('--snapshot', type=Path, default=ROOT / 'data/snapshots/fastapi_11194.tgz')
-    p.add_argument('--graph', type=Path, default=ROOT / 'data/graph/fastapi_a7f2dbe976bf72703376f0cd04487bfc4a849f83.json')
-    p.add_argument('--embeddings', type=Path, default=ROOT / 'data/embeddings/fastapi_a7f2dbe976bf72703376f0cd04487bfc4a849f83.npz')
-    p.add_argument('--wheels', type=Path, default=ROOT / 'data/wheels-fastapi-11194')
+    p.add_argument('--snapshot', type=Path, default=ROOT / 'data/snapshots/fastapi_9753.tgz')
+    p.add_argument('--graph', type=Path, default=ROOT / 'data/graph/fastapi_aee8e78078e8a7f2736d3cab7a1cb7197356951c.json')
+    p.add_argument('--embeddings', type=Path, default=ROOT / 'data/embeddings/fastapi_aee8e78078e8a7f2736d3cab7a1cb7197356951c.npz')
+    p.add_argument('--wheels', type=Path, default=ROOT / 'data/wheels-fastapi-9753')
     p.add_argument('--submission', type=Path, default=ROOT / 'src')
     p.add_argument('--results', type=Path, default=ROOT / 'results/remote-baseline')
     p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/chat/completions'))
@@ -34,6 +37,10 @@ def arguments():
     p.add_argument('--max-tool-calls', type=int, default=50)
     p.add_argument('--max-minutes', type=float, default=10)
     p.add_argument('--max-output-tokens', type=int, default=4096)
+    p.add_argument('--skip-langfuse', action='store_true',
+                   help='Do not upload the completed local trace even when Langfuse is configured.')
+    p.add_argument('--langfuse-session-id',
+                   help='Override the generated Langfuse session ID for this run.')
     return p.parse_args()
 
 
@@ -109,6 +116,7 @@ async def run(args, working):
 if __name__ == '__main__':
     load_dotenv(ROOT / '.env')
     args = arguments()
+    run_started = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     # Avoid the harness's stale global unpacked-wheel cache.
     with tempfile.TemporaryDirectory(prefix='gemma-pipeline-') as tmp:
         previous = tempfile.tempdir
@@ -117,3 +125,11 @@ if __name__ == '__main__':
             asyncio.run(run(args, Path(tmp)))
         finally:
             tempfile.tempdir = previous
+    if not args.skip_langfuse:
+        session_id = args.langfuse_session_id or f'vllm-{args.task_id}-{run_started}'
+        push_to_langfuse(
+            artifact_dir=args.results,
+            task_ids=[args.task_id],
+            session_id=session_id,
+            source_platform='vllm',
+        )
