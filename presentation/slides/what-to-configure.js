@@ -6,70 +6,70 @@ window.WhatToConfigureSlide = function WhatToConfigureSlide({ number, total }) {
       title: "System and analyzer prompts",
       file: "src/prompts/system.md, analyzer.md",
       bullets: [
-        "Main: fast, minimal fix in 8–10 turns.",
-        "Run targeted tests, never the full suite.",
-        "Never edit tests. Always submit a patch.",
-        "Analyzer: root cause, files, lines, fix."
+        "Role, rules and output format per agent.",
+        "Strategy: how to search, test and fix.",
+        "Example: never edit tests.",
+        "Example: aim for a fix in 8–10 turns."
       ]
     },
     {
       title: "Sub-agents via agent_tool",
       file: "src/sub_agents/code_analyzer.yaml",
       bullets: [
-        "Analyzer is a read-only investigator.",
-        "Own prompt, adapter (tool_lora), sampling.",
-        "Same Gemma 4 model as the root agent.",
-        "skip_summarization: report passes through."
+        "Add specialist agents the root can call.",
+        "Each has its own prompt, tools and sampling.",
+        "Optional LoRA adapter per sub-agent.",
+        "Example: a read-only code analyzer."
       ]
     },
     {
       title: "Tool selection per agent",
       file: "src/agent.yaml, tools:",
       bullets: [
-        "Root: all 9 harness tools plus analyzer.",
-        "Files: read, edit, write, run_command.",
-        "Graph: neighbors, similar code, subgraph.",
-        "Analyzer: read_file and 3 graph tools only."
+        "Choose which tools each agent may use.",
+        "Give sub-agents fewer, safer tools.",
+        "Example: root gets all 9 harness tools.",
+        "Example: analyzer gets read_file and graph tools."
       ]
     },
     {
       title: "Skills: repo_navigation workflow",
       file: "src/skills/repo_navigation/SKILL.md",
       bullets: [
-        "Steps 1–2: read issue, inspect repo.",
-        "Step 3: search symbols via graph tools.",
-        "Step 4: delegate read-only, verify leads.",
-        "Steps 5–7: test, minimal edit, submit."
+        "Reusable step-by-step workflows in markdown.",
+        "Edit the steps to change how work is done.",
+        "Example: repo_navigation, a 7-step workflow.",
+        "Example: read issue, search, test, fix, submit."
       ]
     },
     {
       title: "Sampling and thinking budget",
       file: "src/configs/sampling.yaml",
       bullets: [
-        "temperature: 0.2, top_p: 0.95.",
-        "max_output_tokens: 16384.",
-        "thinking_budget: 4096 tokens.",
-        "include_thoughts: on, shared by both agents."
+        "Randomness: temperature and top_p.",
+        "Maximum output tokens per reply.",
+        "Thinking budget and whether thoughts show.",
+        "Example: temperature 0.2, thinking 4096 tokens."
       ]
     },
     {
       title: "LoRA adapters per agent",
       file: "src/adapters/main_lora/, tool_lora/",
       bullets: [
-        "main_lora: root. tool_lora: analyzer.",
-        "PEFT: r 4, alpha 8, dropout 0.",
-        "Targets q_proj, o_proj in layer 0.",
-        "Config only. No weights added yet."
+        "A small add-on adapter for each agent.",
+        "Set rank, alpha, dropout and target layers.",
+        "Example: main_lora for root, tool_lora for analyzer.",
+        "Currently config only, no trained weights."
       ]
     },
     {
       title: "Per-task limits in eval_config",
       file: "src/eval_config.yaml",
       bullets: [
-        "max_tool_calls: 10.",
-        "max_time_minutes: 1, max_turns: 50.",
-        "timeout_seconds: 60 per command.",
-        "Harness defaults are much higher."
+        "Cap tool calls, turns and total time.",
+        "Set a timeout for each command.",
+        "Example: 10 tool calls, 60 s per command.",
+        "Harness defaults are higher."
       ]
     }
   ];
