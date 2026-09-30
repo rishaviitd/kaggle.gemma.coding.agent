@@ -1,0 +1,84 @@
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 45353835..f6300cb6 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -615,6 +615,11 @@ async def solve_dependencies(
+                 scope=sub_dependant.scope,
+             )
+ 
++        if sub_dependant.use_cache and sub_dependant.cache_key in dependency_cache:
++            solved = dependency_cache[sub_dependant.cache_key]
++            if sub_dependant.name is not None:
++                values[sub_dependant.name] = solved
++            continue
+         solved_result = await solve_dependencies(
+             request=request,
+             dependant=use_sub_dependant,
+@@ -630,8 +635,6 @@ async def solve_dependencies(
+         if solved_result.errors:
+             errors.extend(solved_result.errors)
+             continue
+-        if sub_dependant.use_cache and sub_dependant.cache_key in dependency_cache:
+-            solved = dependency_cache[sub_dependant.cache_key]
+         elif (
+             use_sub_dependant.is_gen_callable or use_sub_dependant.is_async_gen_callable
+         ):
+@@ -649,7 +652,7 @@ async def solve_dependencies(
+             solved = await run_in_threadpool(call, **solved_result.values)
+         if sub_dependant.name is not None:
+             values[sub_dependant.name] = solved
+-        if sub_dependant.cache_key not in dependency_cache:
++        if sub_dependant.use_cache:
+             dependency_cache[sub_dependant.cache_key] = solved
+     path_values, path_errors = request_params_to_args(
+         dependant.path_params, request.path_params
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..728c43c8
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,44 @@
++from fastapi import FastAPI, Depends
++from fastapi.testclient import TestClient
++from fastapi.dependencies import SecurityScopes
++import pytest
++
++app = FastAPI()
++
++call_count = 0
++
++def dep_no_scopes():
++    global call_count
++    call_count += 1
++    return "value"
++
++@app.get("/")
++def read_root(d1=Depends(dep_no_scopes), d2=Depends(dep_no_scopes)):
++    return {"d1": d1, "d2": d2}
++
++client = TestClient(app)
++
++def test_dependency_caching_no_scopes():
++    global call_count
++    call_count = 0
++    response = client.get("/")
++    assert response.status_code == 200
++    assert response.json() == {"d1": "value", "d2": "value"}
++    assert call_count == 1
++
++def dep_with_scopes(scopes: SecurityScopes):
++    global call_count
++    call_count += 1
++    return "value"
++
++@app.get("/scopes")
++def read_scopes(d1=Depends(dep_with_scopes), d2=Depends(dep_with_scopes)):
++    return {"d1": d1, "d2": d2}
++
++def test_dependency_caching_with_scopes():
++    global call_count
++    call_count = 0
++    response = client.get("/scopes")
++    assert response.status_code == 200
++    assert response.json() == {"d1": "value", "d2": "value"}
++    assert call_count == 1
