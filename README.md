@@ -148,6 +148,8 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.lock.txt
 ```
 
+In VS Code, select the project environment with **⌘⇧P → Python: Select Interpreter**, then choose `.venv/bin/python` in the repository root. This lets the editor resolve the project's installed packages.
+
 Start Docker Desktop and build the sandbox image:
 
 ```bash
