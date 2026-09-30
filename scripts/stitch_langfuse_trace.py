@@ -81,6 +81,11 @@ def arguments() -> argparse.Namespace:
         help="Kaggle notebook handle (owner/slug); downloads its latest run output before import",
     )
     parser.add_argument(
+        "--results-dir",
+        type=Path,
+        help="Directory containing per-task evaluation JSON files (for local runs)",
+    )
+    parser.add_argument(
         "--download-dir",
         type=Path,
         help="Directory for --kaggle-kernel output; defaults to a new directory under /tmp",
@@ -133,14 +138,25 @@ def observation_dict(row: Any) -> dict[str, Any]:
 
 def find_existing_observations(client: Any, trace_id: str) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
-    response = client.api.observations.get_many(
-        trace_id=trace_id,
-        from_start_time=now - timedelta(days=30),
-        to_start_time=now + timedelta(minutes=1),
-        limit=1000,
-        fields="core,basic,metadata",
-    )
-    return [observation_dict(row) for row in response.data]
+    rows: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        response = client.api.observations.get_many(
+            trace_id=trace_id,
+            from_start_time=now - timedelta(days=30),
+            to_start_time=now + timedelta(minutes=1),
+            limit=1000,
+            cursor=cursor,
+            fields="core,basic,metadata",
+        )
+        rows.extend(observation_dict(row) for row in response.data)
+        cursor = response.meta.cursor
+        if not cursor:
+            return rows
+        if cursor in seen_cursors:
+            raise RuntimeError(f"Repeated Langfuse observation cursor for trace {trace_id}")
+        seen_cursors.add(cursor)
 
 
 def find_session_root_trace_ids(client: Any, session_id: str) -> set[str]:
@@ -302,6 +318,7 @@ def task_result_from_artifacts(
     task_id: str,
     artifact_dir: Path,
     events: list[dict[str, Any]],
+    results_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     from_log = task_result_from_log(task_id, events)
     if from_log is not None:
@@ -311,6 +328,9 @@ def task_result_from_artifacts(
         artifact_dir / f"{task_id}.json",
         artifact_dir / "results" / f"{task_id}.json",
     ]
+    local_results_dir = results_dir
+    if local_results_dir is not None:
+        direct_results.append(local_results_dir / f"{task_id}.json")
     direct_result = next((path for path in direct_results if path.is_file()), direct_results[0])
     candidates: list[dict[str, Any]] = []
     if direct_result.is_file():
@@ -325,6 +345,8 @@ def task_result_from_artifacts(
         artifact_dir / "task_results.jsonl",
         artifact_dir / "results" / "task_results.jsonl",
     ]
+    if local_results_dir is not None:
+        jsonl_results.append(local_results_dir / "task_results.jsonl")
     jsonl_result = next((path for path in jsonl_results if path.is_file()), jsonl_results[0])
     if jsonl_result.is_file():
         for line_number, line in enumerate(jsonl_result.read_text(encoding="utf-8").splitlines(), start=1):
@@ -499,6 +521,7 @@ def upload_run(
     client: Any,
     *,
     artifact_dir: Path,
+    results_dir: Path | None,
     run_label: str,
     source_platform: str,
     session_id: str,
@@ -545,7 +568,7 @@ def upload_run(
                 )
                 raw_child.end()
 
-                result = task_result_from_artifacts(task_id, artifact_dir, events)
+                result = task_result_from_artifacts(task_id, artifact_dir, events, results_dir)
                 agents, tools = stitch_task(
                     client,
                     trace_id=run_root.trace_id,
@@ -583,6 +606,10 @@ def main() -> None:
         args.artifact_dir = args.artifact_dir.expanduser().resolve()
     if not args.artifact_dir.is_dir():
         raise FileNotFoundError(f"Artifact directory not found: {args.artifact_dir}")
+    if args.results_dir is not None:
+        args.results_dir = args.results_dir.expanduser().resolve()
+        if not args.results_dir.is_dir():
+            raise FileNotFoundError(f"Results directory not found: {args.results_dir}")
 
     client = Langfuse(timeout=60)
     if not client.auth_check():
@@ -642,6 +669,7 @@ def main() -> None:
     run_trace_id, run_root_id, summaries, total_agents, total_tools = upload_run(
         client,
         artifact_dir=args.artifact_dir,
+        results_dir=args.results_dir,
         run_label=run_label,
         source_platform=source_platform,
         session_id=session_id,
@@ -654,6 +682,24 @@ def main() -> None:
     replacement: list[dict[str, Any]] = []
     root_children: list[dict[str, Any]] = []
     direct_step_count = nested_tool_count = 0
+    expected_root_children = (
+        total_agents
+        + len(traces)  # raw ATIF observations
+        + len(traces)  # task context observations
+        + sum(bool(summary["result_found"]) for summary in summaries)
+        + int(args.include_console_log and log_path is not None)
+    )
+    session_ids: set[str | None] = set()
+    ordered_step_names: list[str] = []
+    expected_step_names = []
+    for _, trace_data in traces:
+        agent_index = 0
+        for step in trace_data.get("steps", []):
+            if step.get("source") == "agent":
+                agent_index += 1
+                expected_step_names.append(
+                    f"agent-step-{int(step.get('step_id', agent_index)):03d}"
+                )
     verified = False
     last_read_error: Exception | None = None
     for attempt in range(8):
@@ -685,20 +731,13 @@ def main() -> None:
                     key=lambda row: str(first_value(row, "start_time", "startTime") or ""),
                 )
             ]
-            expected_root_children = (
-                total_agents
-                + len(traces)  # raw ATIF observations
-                + len(traces)  # task context observations
-                + sum(bool(summary["result_found"]) for summary in summaries)
-                + int(args.include_console_log and log_path is not None)
-            )
             if (
                 root_row
                 and direct_step_count == total_agents
                 and nested_tool_count == total_tools
                 and len(root_children) == expected_root_children
                 and session_ids == {session_id}
-                and ordered_step_names == sorted(ordered_step_names)
+                and ordered_step_names == expected_step_names
             ):
                 verified = True
                 break
@@ -715,7 +754,10 @@ def main() -> None:
             cleanup_status = f"replacement cleanup failed: {cleanup_error!r}"
         raise RuntimeError(
             f"Replacement hierarchy verification failed (steps={direct_step_count}/{total_agents}, "
-            f"tools={nested_tool_count}/{total_tools}); old traces retained. "
+            f"tools={nested_tool_count}/{total_tools}, "
+            f"root_children={len(root_children)}/{expected_root_children}, "
+            f"session_match={session_ids == {session_id}}, "
+            f"order_match={ordered_step_names == expected_step_names}); old traces retained. "
             f"{cleanup_status}. Last read error: {last_read_error!r}"
         )
 

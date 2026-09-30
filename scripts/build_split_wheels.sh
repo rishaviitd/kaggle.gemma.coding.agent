@@ -21,12 +21,13 @@ done
 docker run --platform linux/amd64 --rm -i \
   --user "$(id -u):$(id -g)" \
   -v "$PWD:/workspace" -w /workspace \
-  python:3.12-slim bash -s <<'CONTAINER_SCRIPT'
+  python:3.13-slim bash -s <<'CONTAINER_SCRIPT'
 set -euo pipefail
 shopt -s nullglob
-export HOME=/tmp/pip-home PIP_CACHE_DIR=/tmp/pip-cache UV_CACHE_DIR=/tmp/uv-cache
-python -m pip install --user -q uv
-export PATH="$HOME/.local/bin:$PATH"
+export PIP_CACHE_DIR=/tmp/pip-cache UV_CACHE_DIR=/tmp/uv-cache
+python -m pip install --target /tmp/task-build-tools -q uv
+export PATH="/tmp/task-build-tools/bin:$PATH" PYTHONPATH=/tmp/task-build-tools
+python scripts/repair_task_wheels.py
 
 for split in train dev val; do
   manifest="data/$split/manifest.csv"

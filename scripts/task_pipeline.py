@@ -16,6 +16,7 @@ import yaml
 from google.adk.apps._configs import EventsCompactionConfig
 from swegemma.config import EvalConfig
 from swegemma.evaluate import Evaluator
+from swegemma.harness.container_setup import _is_wheel_compatible_py313
 from swegemma.models import load_tasks, setup_gemma_model_registry
 
 from langfuse_bridge import push_to_langfuse
@@ -46,13 +47,11 @@ def arguments():
     p.add_argument('--embeddings', type=Path, help='Override the task embeddings path.')
     p.add_argument('--wheels', type=Path, help='Override the task wheel-cache path.')
     p.add_argument('--submission', type=Path, default=ROOT / 'src')
-    p.add_argument('--results', type=Path, help='Override patch/result output directory.')
     p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/'))
     p.add_argument('--model', default='gemma4')
     p.add_argument('--max-tool-calls', type=int, default=50)
     p.add_argument('--max-minutes', type=float, default=10)
     p.add_argument('--max-output-tokens', type=int, default=4096)
-    p.add_argument('--logs', type=Path, help='Override evaluation log/trace directory.')
     p.add_argument('--skip-langfuse', action='store_true',
                    help='Do not upload the completed local trace even when Langfuse is configured.')
     p.add_argument('--langfuse-session-id',
@@ -60,8 +59,7 @@ def arguments():
     args = p.parse_args()
     split_dir = ROOT / 'data' / args.split
     args.tasks = args.tasks or split_dir / 'tasks.jsonl'
-    args.results = args.results or ROOT / 'results' / 'remote' / args.split
-    args.logs = args.logs or ROOT / 'logs' / 'remote' / args.split
+    args.logs = ROOT / 'logs' / 'remote' / args.split
 
     manifest = split_dir / 'manifest.csv'
     if manifest.is_file():
@@ -160,9 +158,11 @@ async def run_one(args, working, agent_dir, key, task, index, total):
     snapshots = working / 'snapshots'
     snapshots.mkdir()
     (snapshots / f'{task.instance_id}.tgz').symlink_to(snapshot.resolve())
+    task_logs = args.logs / task.instance_id
+    task_results = task_logs / 'results'
     config = EvalConfig(
         tasks_path=args.tasks, snapshots_dir=snapshots, submission_dir=agent_dir,
-        results_dir=args.logs, graph_dir=str(graph.parent),
+        results_dir=task_logs, graph_dir=str(graph.parent),
         embeddings_dir=str(embeddings.parent), wheels_dir=wheels,
         models=setup_gemma_model_registry(api_base=args.api_base, api_key=key,
                                          served_model=args.model, num_retries=2),
@@ -173,13 +173,12 @@ async def run_one(args, working, agent_dir, key, task, index, total):
             compaction_interval=15, overlap_size=2, token_threshold=14336,
             event_retention_size=5),
     )
-    args.results.mkdir(parents=True, exist_ok=True)
-    args.logs.mkdir(parents=True, exist_ok=True)
+    task_results.mkdir(parents=True, exist_ok=True)
     print(f'[{index}/{total}] Running {task.instance_id} with remote model {args.model}; '
           'workspaces/tests run locally.', flush=True)
     result = await Evaluator(config).evaluate_task(task=task, task_index=index, total_tasks=total)
-    (args.results / f'{task.instance_id}.patch').write_text(result.agent_patch or '')
-    (args.results / f'{task.instance_id}.json').write_text(
+    (task_results / f'{task.instance_id}.patch').write_text(result.agent_patch or '')
+    (task_results / f'{task.instance_id}.json').write_text(
         result.model_dump_json(indent=2, exclude={'trace'}))
     summary = {'task_id': task.instance_id, 'resolved': result.resolved,
                'test_exit_code': result.test_exit_code,
@@ -199,6 +198,18 @@ async def run(args, working):
     if missing_wheels:
         raise ValueError('Task wheel caches are empty for: ' + ', '.join(missing_wheels)
                          + '. Build them with scripts/build_split_wheels.sh')
+    incompatible = []
+    for task_id in args.task_ids:
+        wheels = list(args.asset_rows[task_id]['wheels'].glob('*.whl'))
+        packages = {wheel.name.split('-')[0] for wheel in wheels}
+        supported = {wheel.name.split('-')[0] for wheel in wheels
+                     if _is_wheel_compatible_py313(wheel.name)}
+        if packages - supported:
+            incompatible.append(f"{task_id}: {', '.join(sorted(packages - supported))}")
+    if incompatible:
+        raise ValueError('Packages have no Python 3.13-compatible wheel: '
+                         + '; '.join(incompatible)
+                         + '. Repair caches with scripts/repair_task_wheels.py in Python 3.13 Linux Docker.')
     key = os.getenv('VLLM_API_KEY') or os.getenv('VLLMAPI_KEY')
     if not key:
         raise ValueError('Set VLLM_API_KEY in .env')
@@ -209,20 +220,30 @@ async def run(args, working):
     litellm.drop_params = True
     agent_dir = working / 'agent'
     prepare_agent(args, agent_dir)
-    args.results.mkdir(parents=True, exist_ok=True)
     args.logs.mkdir(parents=True, exist_ok=True)
-    summaries = []
     for index, task_id in enumerate(args.task_ids, start=1):
+        task_logs = args.logs / task_id
+        if task_logs.exists():
+            shutil.rmtree(task_logs)
         task_working = working / f'{index:03d}-{task_id}'
         task_working.mkdir()
+        # The harness uses a fixed sp_base.tar name for unpacked dependencies.
+        # Different tasks must never share that cached archive.
+        cache_dir = task_working / 'cache'
+        cache_dir.mkdir()
+        previous_tempdir = tempfile.tempdir
         try:
+            tempfile.tempdir = str(cache_dir)
             summary = await run_one(args, task_working, agent_dir, key,
                                     tasks[task_id], index, len(args.task_ids))
         except Exception as error:
             summary = {'task_id': task_id, 'resolved': False, 'error': str(error)}
             print(json.dumps(summary), flush=True)
-        summaries.append(summary)
-        (args.results / 'batch_summary.json').write_text(json.dumps(summaries, indent=2))
+            result_path = args.logs / task_id / 'results' / f'{task_id}.json'
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(json.dumps(summary, indent=2))
+        finally:
+            tempfile.tempdir = previous_tempdir
 
 
 if __name__ == '__main__':
@@ -239,19 +260,16 @@ if __name__ == '__main__':
             tempfile.tempdir = previous
     if not args.skip_langfuse:
         session_id = args.langfuse_session_id or f'vllm-{args.split}-{run_started}'
-        trace_dirs = (args.logs / 'results' / 'traces', args.logs / 'traces')
-        traced_ids = {
-            path.stem.removeprefix('trace_')
-            for trace_dir in trace_dirs if trace_dir.is_dir()
-            for path in trace_dir.glob('trace_*.json')
-        }
-        upload_ids = [task_id for task_id in args.task_ids if task_id in traced_ids]
-        if upload_ids:
+        upload_ids = [task_id for task_id in args.task_ids
+                      if (args.logs / task_id / 'traces' / f'trace_{task_id}.json').is_file()]
+        if not upload_ids:
+            print('Langfuse upload skipped: no ATIF trace was generated.', flush=True)
+        for task_id in upload_ids:
+            task_logs = args.logs / task_id
             push_to_langfuse(
-                artifact_dir=args.logs,
-                task_ids=upload_ids,
+                artifact_dir=task_logs,
+                results_dir=task_logs / 'results',
+                task_ids=[task_id],
                 session_id=session_id,
                 source_platform='vllm',
             )
-        else:
-            print('Langfuse upload skipped: no ATIF trace was generated.', flush=True)

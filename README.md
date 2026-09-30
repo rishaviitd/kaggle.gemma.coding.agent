@@ -44,8 +44,7 @@ data/
   docker/ sandbox/        Evaluation container and sandbox setup
 src/                     Agent submission: YAML, prompts, tools, skills, and adapters
 scripts/                 Split planning, wheel building, evaluation, and inference pipeline
-logs/remote/<split>/      Per-split traces and model request logs
-results/remote/<split>/   Per-split patches and evaluation summaries
+logs/remote/<split>/<task_id>/   Per-task logs/, traces/, results/, and checks/
 notebooks/                Kaggle inference notebook
 presentation/             Project presentation source
 ```
@@ -185,6 +184,23 @@ bash scripts/build_split_wheels.sh
 
 The planner accepts the organizer's `graphs/` folder or the older root-level asset folders and consolidates their files under `data/assets/`. Wheel caches are stored in `data/assets/task_wheels/<task_id>/`; the builder skips any task that already has wheels.
 
+Task wheels target **Python 3.13 on Linux amd64**, matching the sandbox; the host environment uses Python 3.12. The builder repairs incompatible cached wheels before skipping existing caches. To repair caches independently, preserving existing files:
+
+```bash
+docker run --platform linux/amd64 --rm \
+  -v "$PWD:/workspace" -w /workspace \
+  python:3.13-slim python scripts/repair_task_wheels.py
+```
+
+After repair, verify a saved agent patch without calling the model again:
+
+```bash
+.venv/bin/python scripts/evaluate.py --task-id fastapi_14786 \
+  --patch-file logs/remote/train/fastapi_14786/results/fastapi_14786.patch
+```
+
+Reverification results are saved beside the task at `logs/remote/<split>/<task_id>/checks/reverification/result.json`. Existing agent traces retain the environment errors the model saw; repeat inference with repaired caches when measuring agent behavior.
+
 ### Verify the reference fix
 
 This runs without a model and confirms the local evaluation setup:
@@ -201,7 +217,7 @@ The local inference server must expose the competition model and support automat
 LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/evaluate.py
 ```
 
-This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes to `results/baseline/`. Reference patches are used only with `--reference-check`.
+This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes under `logs/remote/val/fastapi_11194/checks/baseline/`. Reference patches are used only with `--reference-check`.
 
 ### Run with a remote vLLM server
 
@@ -218,7 +234,7 @@ Run the base-model pipeline (or pass `--api-base` for a different endpoint):
   --api-base https://your-model-server/v1 --model gemma4
 ```
 
-Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split dev`, or `--split val`). The task must belong to that split. Its task list and asset paths are resolved from the split manifest. Logs, ATIF traces, and model request captures go under `logs/remote/<split>/`; patches and evaluation summaries go under `results/remote/<split>/`. If Langfuse is configured, the completed task trace and evaluation result are uploaded automatically in a new `vllm-<task>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
+Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split dev`, or `--split val`). The task must belong to that split. Its task list and asset paths are resolved from the split manifest. Each task writes to `logs/remote/<split>/<task_id>/`: `traces/` holds its ATIF trace, `logs/` holds console output, and `results/` holds its patch and evaluation JSON. For example, `logs/remote/train/fastapi_14258/traces/trace_fastapi_14258.json` matches `logs/remote/train/fastapi_14258/results/fastapi_14258.json` and `.patch`. Tasks can run in parallel terminals without creating batch folders. Rerunning a task replaces that task's previous artifacts. If Langfuse is configured, each completed task trace and evaluation result is uploaded under the same `vllm-<split>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
 
 Run an entire split or select several task IDs; comma-separated IDs also work:
 

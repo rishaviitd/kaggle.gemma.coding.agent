@@ -39,6 +39,7 @@ def langfuse_is_configured(env_file: Path = ROOT / ".env") -> bool:
 def push_to_langfuse(
     *,
     artifact_dir: Path | None = None,
+    results_dir: Path | None = None,
     kaggle_kernel: str | None = None,
     task_ids: list[str] | None = None,
     session_id: str | None = None,
@@ -66,6 +67,8 @@ def push_to_langfuse(
         command.extend(["--artifact-dir", str(artifact_dir.resolve())])
     else:
         command.extend(["--kaggle-kernel", str(kaggle_kernel)])
+    if results_dir is not None:
+        command.extend(["--results-dir", str(results_dir.resolve())])
     if session_id:
         command.extend(["--session-id", session_id])
     for task_id in task_ids or []:
