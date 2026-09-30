@@ -24,7 +24,7 @@ async def main():
         tasks_path=ROOT / 'data/tasks.jsonl',
         snapshots_dir=ROOT / 'data/snapshots',
         submission_dir=ROOT / 'src',
-        results_dir=ROOT / 'results' / ('reference' if args.reference_check else 'baseline'),
+        results_dir=ROOT / 'logs' / ('reference' if args.reference_check else 'baseline'),
         graph_dir=str(ROOT / 'data/graph'),
         embeddings_dir=str(ROOT / 'data/embeddings'),
         wheels_dir=ROOT / 'data/wheels-fastapi-11194',
@@ -49,7 +49,8 @@ async def main():
             agent_patch=task.patch,
             start_time=time.perf_counter(),
         )
-        output = config.results_dir / f'{args.task_id}.json'
+        output = ROOT / 'results' / 'reference' / f'{args.task_id}.json'
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(result.model_dump_json(indent=2))
         print(f'Reference resolved: {result.resolved}. Details: {output}', flush=True)
         if not result.resolved:

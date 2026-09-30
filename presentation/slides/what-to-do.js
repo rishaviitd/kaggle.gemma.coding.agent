@@ -99,7 +99,7 @@
             title: "Score + artifacts",
             content: h(React.Fragment, null,
               h("p", null, "Resolved / not resolved → resolution rate"),
-              h("code", { className: "flow__tool-sequence" }, "results/remote-baseline/fastapi_11194.patch · .json")
+              h("code", { className: "flow__tool-sequence" }, "results/remote/fastapi_11194.patch · .json")
             )
           }
         ]

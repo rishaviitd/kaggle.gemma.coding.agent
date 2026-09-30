@@ -42,12 +42,12 @@ The competition provides a public training/development set for agent training, p
 
 The public set contains **129 Python bug-fixing and feature-request tasks** from `fastapi/fastapi`, `Textualize/rich`, `psf/requests`, and `encode/httpx`.
 
-| Asset | What it contains |
-| --- | --- |
+| Asset         | What it contains                                                                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tasks.jsonl` | Task ID, repository, base commit, problem statement, optional hints, creation timestamp, reference solution (`patch`), and verification tests (`test_patch`). |
-| `snapshots/` | A Git repository archive for each task, frozen before the fix. Forward commit history is removed to prevent access to future solutions. |
-| `graphs/` | Python AST call and dependency graphs containing code symbols, source definitions, and relationships for structural navigation. |
-| `embeddings/` | 256-dimensional float32 vectors for code symbols, used for semantic code search. |
+| `snapshots/`  | A Git repository archive for each task, frozen before the fix. Forward commit history is removed to prevent access to future solutions.                       |
+| `graphs/`     | Python AST call and dependency graphs containing code symbols, source definitions, and relationships for structural navigation.                               |
+| `embeddings/` | 256-dimensional float32 vectors for code symbols, used for semantic code search.                                                                              |
 
 Reference fixes and verification tests are available for training and offline analysis. They must remain separate from the task input when measuring the agent's ability to solve an issue.
 
@@ -93,18 +93,18 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 
 ### Supported tools
 
-| Tool | Purpose |
-| --- | --- |
-| `run_command` | Run shell commands in the task workspace. |
-| `read_file` | Read workspace files. |
-| `edit_file` / `write_file` | Modify or create workspace files. |
-| `get_status` | Check remaining budget and patch status. |
-| `submit_patch` | Submit the generated Git diff. |
-| `get_code_neighbors` | Find related symbols and callers. |
-| `search_similar_code` | Find semantically similar code. |
-| `get_code_subgraph` | Inspect relationships among code symbols. |
-| `load_skill_resource` | Read a knowledge file from a skill attached to the agent. |
-| `run_skill_script` | Run an attached skill's script inside the task sandbox. |
+| Tool                       | Purpose                                                   |
+| -------------------------- | --------------------------------------------------------- |
+| `run_command`              | Run shell commands in the task workspace.                 |
+| `read_file`                | Read workspace files.                                     |
+| `edit_file` / `write_file` | Modify or create workspace files.                         |
+| `get_status`               | Check remaining budget and patch status.                  |
+| `submit_patch`             | Submit the generated Git diff.                            |
+| `get_code_neighbors`       | Find related symbols and callers.                         |
+| `search_similar_code`      | Find semantically similar code.                           |
+| `get_code_subgraph`        | Inspect relationships among code symbols.                 |
+| `load_skill_resource`      | Read a knowledge file from a skill attached to the agent. |
+| `run_skill_script`         | Run an attached skill's script inside the task sandbox.   |
 
 Skill tools are available when skills are declared in the agent YAML; this repository does not currently configure any skills.
 
@@ -156,30 +156,16 @@ docker build --platform linux/amd64 -t swebench-sandbox:latest -f data/docker/Do
 
 The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses emulation, so run times may differ. Task datasets and organizer wheels must be obtained separately; they are excluded from Git. The checked local setup currently targets `fastapi_11194`.
 
-### Prepare offline wheels for another task
+### Store shared assets and prepare split references
 
-Each task can require different package versions. Download its repository snapshot, extract it, then build a task-specific wheel cache. Generate Linux wheels compatible with the sandbox (Python 3.12, `linux/amd64`); do not use macOS-only wheels.
-
-```bash
-TASK_ID=your_task_id
-mkdir -p "/tmp/$TASK_ID" "data/wheels-$TASK_ID"
-tar -xzf "data/snapshots/$TASK_ID.tgz" -C "/tmp/$TASK_ID"
-
-python -m pip download \
-  --dest "data/wheels-$TASK_ID" \
-  "/tmp/$TASK_ID[standard]" \
-  -r "/tmp/$TASK_ID/requirements-tests.txt"
-```
-
-Use that cache when running the task:
+Keep physical assets in one place under `data/assets/`: snapshots, graphs, embeddings, and task-specific wheel caches. Split folders contain task metadata and symlinks to only the assets their tasks use. Wheel caches are keyed by task ID, so changing split assignments does not require rebuilding them.
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --task-id "$TASK_ID" \
-  --snapshot "data/snapshots/$TASK_ID.tgz" \
-  --wheels "data/wheels-$TASK_ID"
+python3 scripts/plan_task_splits.py --materialize
+bash scripts/build_split_wheels.sh
 ```
 
-Share or commit the generated `data/wheels-$TASK_ID/` directory with teammates so their isolated Docker runs can install dependencies without internet access.
+The planner accepts the organizer's `graphs/` folder or the older root-level asset folders and consolidates their files under `data/assets/`. Wheel caches are stored in `data/assets/task_wheels/<task_id>/`; the builder skips any task that already has wheels.
 
 ### Verify the reference fix
 
@@ -210,11 +196,19 @@ VLLM_API_KEY=your-key-here
 Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --task-id fastapi_11194 \
+.venv/bin/python scripts/task_pipeline.py --val --task-id fastapi_11194 \
   --api-base https://your-model-server/v1 --model gemma4
 ```
 
-It checks tool calling before starting, runs workspaces and verification locally in Docker, and saves patches, logs, traces, and results under `results/remote-baseline/`. If Langfuse is configured, the completed task trace and evaluation result are uploaded automatically in a new `vllm-<task>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
+Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split dev`, or `--split val`). The task must belong to that split. Its task list and asset paths are resolved from the split manifest. Logs, ATIF traces, and model request captures go under `logs/remote/<split>/`; patches and evaluation summaries go under `results/remote/<split>/`. If Langfuse is configured, the completed task trace and evaluation result are uploaded automatically in a new `vllm-<task>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
+
+Run an entire split or select several task IDs; comma-separated IDs also work:
+
+```bash
+.venv/bin/python scripts/task_pipeline.py --train --all
+.venv/bin/python scripts/task_pipeline.py --dev --task-ids <task-id-1> <task-id-2>
+.venv/bin/python scripts/task_pipeline.py --val --task-ids <task-id-1>,<task-id-2>
+```
 
 Defaults allow 50 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
 

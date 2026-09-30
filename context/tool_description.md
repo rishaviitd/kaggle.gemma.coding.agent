@@ -1,6 +1,6 @@
 # Tool descriptions sent to vLLM
 
-Extracted verbatim from the first captured request in `results/remote-baseline/model_requests/fastapi_11194.jsonl`. These are the `function.description` strings in the top-level `tools` array. Parameter schemas are included as sent.
+Extracted verbatim from the first captured request in `logs/remote/model_requests/fastapi_11194.jsonl`. These are the `function.description` strings in the top-level `tools` array. Parameter schemas are included as sent.
 
 ## run_command
 
