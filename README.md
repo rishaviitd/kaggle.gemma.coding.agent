@@ -34,6 +34,24 @@ The [Gemma 4 Developer Agent Competition](https://www.kaggle.com/competitions/ge
 
 All agents must use `gemma-4-31b-it-qat-w4a16-ct`. Submissions include an `agent.yaml` configuration, supporting prompts, tools, skills, and optional LoRA adapters in `submission.zip`.
 
+## Project structure
+
+```text
+context/                 Competition overview, data, and harness notes
+data/
+  assets/                Local snapshots, graphs, embeddings, and task wheels (gitignored)
+  train/ dev/ val/        Split manifests and task lists, with symlinks to their assets
+  docker/ sandbox/        Evaluation container and sandbox setup
+src/                     Agent submission: YAML, prompts, tools, skills, and adapters
+scripts/                 Split planning, wheel building, evaluation, and inference pipeline
+logs/remote/<split>/      Per-split traces and model request logs
+results/remote/<split>/   Per-split patches and evaluation summaries
+notebooks/                Kaggle inference notebook
+presentation/             Project presentation source
+```
+
+The split folders reference shared files in `data/assets/`, which are local downloads and are not committed. Run `scripts/plan_task_splits.py --materialize` after restoring the Kaggle data to rebuild those references.
+
 ## Data
 
 The competition provides a public training/development set for agent training, prompt design, and local validation. During scoring, it is replaced by a hidden test set. Both sets use the same graph-generation methods and verification standards. See the [dataset description](context/data.md) for the full schema.
@@ -147,8 +165,6 @@ Python 3.12 is needed for local evaluation. Restore the environment from the loc
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.lock.txt
 ```
-
-In VS Code, select the project environment with **⌘⇧P → Python: Select Interpreter**, then choose `.venv/bin/python` in the repository root. This lets the editor resolve the project's installed packages.
 
 Start Docker Desktop and build the sandbox image:
 
