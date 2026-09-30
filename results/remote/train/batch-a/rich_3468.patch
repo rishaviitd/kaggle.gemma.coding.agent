@@ -1,0 +1,121 @@
+diff --git a/rich/console.py b/rich/console.py
+index ee543553..662d5380 100644
+--- a/rich/console.py
++++ b/rich/console.py
+@@ -2010,62 +2010,66 @@ class Console:
+                     display(self._buffer, self._render_buffer(self._buffer[:]))
+                     del self._buffer[:]
+                 else:
+-                    if WINDOWS:
+-                        use_legacy_windows_render = False
+-                        if self.legacy_windows:
+-                            fileno = get_fileno(self.file)
+-                            if fileno is not None:
+-                                use_legacy_windows_render = (
+-                                    fileno in _STD_STREAMS_OUTPUT
+-                                )
+-
+-                        if use_legacy_windows_render:
+-                            from rich._win32_console import LegacyWindowsTerm
+-                            from rich._windows_renderer import legacy_windows_render
+-
+-                            buffer = self._buffer[:]
+-                            if self.no_color and self._color_system:
+-                                buffer = list(Segment.remove_color(buffer))
+-
+-                            legacy_windows_render(buffer, LegacyWindowsTerm(self.file))
++                    try:
++                        if WINDOWS:
++                            use_legacy_windows_render = False
++                            if self.legacy_windows:
++                                fileno = get_fileno(self.file)
++                                if fileno is not None:
++                                    use_legacy_windows_render = (
++                                        fileno in _STD_STREAMS_OUTPUT
++                                    )
++
++                            if use_legacy_windows_render:
++                                from rich._win32_console import LegacyWindowsTerm
++                                from rich._windows_renderer import legacy_windows_render
++
++                                buffer = self._buffer[:]
++                                if self.no_color and self._color_system:
++                                    buffer = list(Segment.remove_color(buffer))
++
++                                legacy_windows_render(buffer, LegacyWindowsTerm(self.file))
++                            else:
++                                # Either a non-std stream on legacy Windows, or modern Windows.
++                                text = self._render_buffer(self._buffer[:])
++                                # https://bugs.python.org/issue37871
++                                # https://github.com/python/cpython/issues/82052
++                                # We need to avoid writing more than 32Kb in a single write, due to the above bug
++                                write = self.file.write
++                                # Worse case scenario, every character is 4 bytes of utf-8
++                                MAX_WRITE = 32 * 1024 // 4
++                                try:
++                                    if len(text) <= MAX_WRITE:
++                                        write(text)
++                                    else:
++                                        batch: List[str] = []
++                                        batch_append = batch.append
++                                        size = 0
++                                        for line in text.splitlines(True):
++                                            if size + len(line) > MAX_WRITE and batch:
++                                                write("".join(batch))
++                                                batch.clear()
++                                                size = 0
++                                            batch_append(line)
++                                            size += len(line)
++                                        if batch:
++                                            write("".join(batch))
++                                            batch.clear()
++                                except UnicodeEncodeError as error:
++                                    error.reason = f"{error.reason}\n*** You may need to add PYTHONIOENCODING=utf-8 to your environment ***"
++                                    raise
+                         else:
+-                            # Either a non-std stream on legacy Windows, or modern Windows.
+                             text = self._render_buffer(self._buffer[:])
+-                            # https://bugs.python.org/issue37871
+-                            # https://github.com/python/cpython/issues/82052
+-                            # We need to avoid writing more than 32Kb in a single write, due to the above bug
+-                            write = self.file.write
+-                            # Worse case scenario, every character is 4 bytes of utf-8
+-                            MAX_WRITE = 32 * 1024 // 4
+                             try:
+-                                if len(text) <= MAX_WRITE:
+-                                    write(text)
+-                                else:
+-                                    batch: List[str] = []
+-                                    batch_append = batch.append
+-                                    size = 0
+-                                    for line in text.splitlines(True):
+-                                        if size + len(line) > MAX_WRITE and batch:
+-                                            write("".join(batch))
+-                                            batch.clear()
+-                                            size = 0
+-                                        batch_append(line)
+-                                        size += len(line)
+-                                    if batch:
+-                                        write("".join(batch))
+-                                        batch.clear()
++                                self.file.write(text)
+                             except UnicodeEncodeError as error:
+                                 error.reason = f"{error.reason}\n*** You may need to add PYTHONIOENCODING=utf-8 to your environment ***"
+                                 raise
+-                    else:
+-                        text = self._render_buffer(self._buffer[:])
+-                        try:
+-                            self.file.write(text)
+-                        except UnicodeEncodeError as error:
+-                            error.reason = f"{error.reason}\n*** You may need to add PYTHONIOENCODING=utf-8 to your environment ***"
+-                            raise
+-
+-                    self.file.flush()
++
++                        self.file.flush()
++                    except BrokenPipeError:
++                        import sys
++                        sys.exit(0)
+                     del self._buffer[:]
+ 
+     def _render_buffer(self, buffer: Iterable[Segment]) -> str:

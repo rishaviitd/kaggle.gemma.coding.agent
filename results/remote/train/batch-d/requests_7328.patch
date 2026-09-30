@@ -1,0 +1,95 @@
+diff --git a/reproduce_bug.py b/reproduce_bug.py
+new file mode 100644
+index 00000000..8d419ee2
+--- /dev/null
++++ b/reproduce_bug.py
+@@ -0,0 +1,69 @@
++import requests
++from requests import Session
++from unittest.mock import MagicMock, patch
++
++def test_redirect_history():
++    s = Session()
++    
++    # Mock responses for redirects
++    # First request -> 302 to /2
++    # Second request -> 302 to /3
++    # Third request -> 200 OK
++    
++    mock_resp1 = MagicMock(spec=requests.Response)
++    mock_resp1.status_code = 302
++    mock_resp1.url = 'http://example.com/1'
++    # Use a real CaseInsensitiveDict and ensure it's assigned to .headers
++    mock_resp1.headers = requests.structures.CaseInsensitiveDict({'location': 'http://example.com/2'})
++    mock_resp1.is_redirect = True
++    mock_resp1.history = []
++    mock_resp1.raw = MagicMock()
++    
++    mock_resp2 = MagicMock(spec=requests.Response)
++    mock_resp2.status_code = 302
++    mock_resp2.url = 'http://example.com/2'
++    mock_resp2.headers = requests.structures.CaseInsensitiveDict({'location': 'http://example.com/3'})
++    mock_resp2.is_redirect = True
++    mock_resp2.history = []
++    mock_resp2.raw = MagicMock()
++    
++    mock_resp3 = MagicMock(spec=requests.Response)
++    mock_resp3.status_code = 200
++    mock_resp3.url = 'http://example.com/3'
++    mock_resp3.headers = requests.structures.CaseInsensitiveDict({})
++    mock_resp3.is_redirect = False
++    mock_resp3.history = []
++    mock_resp3.raw = MagicMock()
++
++    # Mock the adapter's send method
++    with patch('requests.adapters.HTTPAdapter.send', side_effect=[mock_resp1, mock_resp2, mock_resp3]) as mock_adapter_send:
++        resp = s.get('http://example.com/1')
++        
++        print(f"Final URL: {resp.url}")
++        print(f"History length: {len(resp.history)}")
++        
++        for i, r in enumerate(resp.history):
++            print(f"History item {i}: {r}")
++            if r is resp:
++                print("BUG FOUND: Response object includes itself in its history!")
++                return False
++                
++        if resp in resp.history:
++            print("BUG FOUND: Response object is in its history!")
++            return False
++            
++        print("No bug found. Response object is not in its history.")
++        return True
++
++if __name__ == "__main__":
++    try:
++        if test_redirect_history():
++            print("Test Passed")
++        else:
++            print("Test Failed")
++            exit(1)
++    except Exception as e:
++        print(f"An exception occurred: {e}")
++        import traceback
++        traceback.print_exc()
++        exit(1)
+diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+index 578cc44d..5c8dc5e9 100644
+--- a/src/requests/sessions.py
++++ b/src/requests/sessions.py
+@@ -181,14 +181,13 @@ class SessionRedirectMixin:
+             # Update history and keep track of redirects.
+             # resp.history must ignore the original request in this loop
+             hist.append(resp)
+-            resp.history = hist[1:]
+ 
+             try:
+                 resp.content  # Consume socket so it can be released
+             except (ChunkedEncodingError, ContentDecodingError, RuntimeError):
+                 resp.raw.read(decode_content=False)
+ 
+-            if len(resp.history) >= self.max_redirects:
++            if len(hist) > self.max_redirects:
+                 raise TooManyRedirects(
+                     f"Exceeded {self.max_redirects} redirects.", response=resp
+                 )

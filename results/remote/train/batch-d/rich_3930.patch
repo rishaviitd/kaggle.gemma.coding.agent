@@ -1,0 +1,194 @@
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..4a79e83e 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -16,6 +16,43 @@ _SINGLE_CELL_UNICODE_RANGES: list[tuple[int, int]] = [
+     (0x02800, 0x028FF),  # Braille
+ ]
+ 
++# Continuation characters: characters that cannot start a grapheme.
++# These include combining marks, variation selectors, ZWJ, and emoji modifiers.
++_GRAPHEME_CONTINUATION_RANGES = [
++    (0x0300, 0x036F),
++    (0x1AB0, 0x1AFF),
++    (0x20D0, 0x20FF),
++    (0xFE00, 0xFE0F),
++    (0xFE20, 0xFE2F),
++    (0x200D, 0x200D),
++    (0x1F3FB, 0x1F3FF),
++    (0xE0100, 0xE01EF),
++]
++
++
++def iter_graphemes(text: str):
++    """Iterate over the grapheme clusters in a string."""
++    if not text:
++        return
++
++    grapheme = ""
++    for char in text:
++        cp = ord(char)
++        is_continuation = False
++        for start, end in _GRAPHEME_CONTINUATION_RANGES:
++            if start <= cp <= end:
++                is_continuation = True
++                break
++
++        if grapheme and is_continuation:
++            grapheme += char
++        else:
++            if grapheme:
++                yield grapheme
++            grapheme = char
++    if grapheme:
++        yield grapheme
++
+ # A set of characters that are a single cell wide
+ _SINGLE_CELLS = frozenset(
+     [
+@@ -110,22 +147,19 @@ def set_cell_size(text: str, total: int) -> str:
+     if cell_size < total:
+         return text + " " * (total - cell_size)
+ 
+-    start = 0
+-    end = len(text)
++    current_text = ""
++    current_width = 0
++    for grapheme in iter_graphemes(text):
++        g_width = cell_len(grapheme)
++        if current_width + g_width > total:
++            break
++        current_text += grapheme
++        current_width += g_width
+ 
+-    # Binary search until we find the right size
+-    while True:
+-        pos = (start + end) // 2
+-        before = text[: pos + 1]
+-        before_len = cell_len(before)
+-        if before_len == total + 1 and cell_len(before[-1]) == 2:
+-            return before[:-1] + " "
+-        if before_len == total:
+-            return before
+-        if before_len > total:
+-            end = pos
+-        else:
+-            start = pos
++    if current_width < total:
++        current_text += " " * (total - current_width)
++
++    return current_text
+ 
+ 
+ def chop_cells(
+@@ -142,7 +176,22 @@ def chop_cells(
+         A list of strings such that each string in the list has cell width
+         less than or equal to the available width.
+     """
+-    _get_character_cell_size = get_character_cell_size
++    if _is_single_cell_widths(text):
++        # Optimization for single-cell characters
++        lines: list[list[str]] = [[]]
++        append_new_line = lines.append
++        append_to_last_line = lines[-1].append
++        total_width = 0
++        for character in text:
++            if total_width + 1 > width:
++                append_new_line([character])
++                append_to_last_line = lines[-1].append
++                total_width = 1
++            else:
++                append_to_last_line(character)
++                total_width += 1
++        return ["".join(line) for line in lines]
++
+     lines: list[list[str]] = [[]]
+ 
+     append_new_line = lines.append
+@@ -150,17 +199,17 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
+-        char_doesnt_fit = total_width + cell_width > width
++    for grapheme in iter_graphemes(text):
++        g_width = cell_len(grapheme)
++        g_doesnt_fit = total_width + g_width > width
+ 
+-        if char_doesnt_fit:
+-            append_new_line([character])
++        if g_doesnt_fit:
++            append_new_line([grapheme])
+             append_to_last_line = lines[-1].append
+-            total_width = cell_width
++            total_width = g_width
+         else:
+-            append_to_last_line(character)
+-            total_width += cell_width
++            append_to_last_line(grapheme)
++            total_width += g_width
+ 
+     return ["".join(line) for line in lines]
+ 
+diff --git a/test_graphemes_fix.py b/test_graphemes_fix.py
+new file mode 100644
+index 00000000..f620780d
+--- /dev/null
++++ b/test_graphemes_fix.py
+@@ -0,0 +1,55 @@
++from rich.cells import set_cell_size, chop_cells, cell_len
++
++def test_graphemes():
++    # Emoji with modifier: 👩‍👩‍👧‍👦 (Family: Woman, Woman, Girl, Boy)
++    # This is a sequence of emojis joined by ZWJ.
++    # It should be treated as a single grapheme.
++    family = "👩‍👩‍👧‍👦"
++    # In many terminals, this is 2 cells wide per emoji, but let's see what cell_len says.
++    # Actually, cell_len for this family emoji might be 8 (4 * 2).
++    # But it should be treated as one unit for wrapping/cropping.
++    
++    # Let's use a simpler example: a character with a combining mark.
++    # 'a' + combining acute accent (U+0301)
++    combined = "a\u0301" 
++    print(f"Combined: {combined}, len: {len(combined)}, cell_len: {cell_len(combined)}")
++    
++    # set_cell_size should not split 'a' and its accent.
++    # If total=1, it should keep both if the combined width is 1.
++    res = set_cell_size(combined, 1)
++    print(f"set_cell_size(combined, 1): {res}, len: {len(res)}")
++    assert res == combined
++    
++    # If total=0, it should be empty.
++    res = set_cell_size(combined, 0)
++    print(f"set_cell_size(combined, 0): {res}, len: {len(res)}")
++    assert res == ""
++
++    # chop_cells should not split 'a' and its accent.
++    res = chop_cells(combined, 1)
++    print(f"chop_cells(combined, 1): {res}")
++    assert res == [combined]
++    
++    # Test with a string that should be split
++    text = "abc\u0301def" # 'c' has an accent
++    # cell_len("abc\u0301def") = 1+1+1+0+1+1+1 = 6
++    print(f"Text: {text}, cell_len: {cell_len(text)}")
++    
++    # Chop at width 3: "abc\u0301" (width 3), "def" (width 3)
++    res = chop_cells(text, 3)
++    print(f"chop_cells(text, 3): {res}")
++    assert res == ["abc\u0301", "def"]
++
++    # Set cell size to 3: "abc\u0301"
++    res = set_cell_size(text, 3)
++    print(f"set_cell_size(text, 3): {res}")
++    assert res == "abc\u0301"
++
++    # Set cell size to 4: "abc\u0301d"
++    res = set_cell_size(text, 4)
++    print(f"set_cell_size(text, 4): {res}")
++    assert res == "abc\u0301d"
++
++if __name__ == "__main__":
++    test_graphemes()
++    print("All tests passed!")
