@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -20,6 +19,7 @@ from swegemma.harness.container_setup import _is_wheel_compatible_py313
 from swegemma.models import load_tasks, setup_gemma_model_registry
 
 from langfuse_bridge import push_to_langfuse
+from vllm_trace_proxy import VllmTraceProxy
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,7 +49,9 @@ def arguments():
     p.add_argument('--submission', type=Path, default=ROOT / 'src')
     p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/'))
     p.add_argument('--model', default='gemma4')
-    p.add_argument('--max-tool-calls', type=int, default=50)
+    p.add_argument('--iteration', type=int, default=1,
+                   help='Experiment iteration number used in Langfuse task names.')
+    p.add_argument('--max-tool-calls', type=int, default=25)
     p.add_argument('--max-minutes', type=float, default=10)
     p.add_argument('--max-output-tokens', type=int, default=4096)
     p.add_argument('--skip-langfuse', action='store_true',
@@ -59,6 +61,8 @@ def arguments():
     args = p.parse_args()
     split_dir = ROOT / 'data' / args.split
     args.tasks = args.tasks or split_dir / 'tasks.jsonl'
+    if args.iteration < 1:
+        p.error('--iteration must be a positive integer')
     args.logs = ROOT / 'logs' / 'remote' / args.split
 
     manifest = split_dir / 'manifest.csv'
@@ -160,11 +164,13 @@ async def run_one(args, working, agent_dir, key, task, index, total):
     (snapshots / f'{task.instance_id}.tgz').symlink_to(snapshot.resolve())
     task_logs = args.logs / task.instance_id
     task_results = task_logs / 'results'
+    proxy = VllmTraceProxy(args.api_base)
+    proxy.start()
     config = EvalConfig(
         tasks_path=args.tasks, snapshots_dir=snapshots, submission_dir=agent_dir,
         results_dir=task_logs, graph_dir=str(graph.parent),
         embeddings_dir=str(embeddings.parent), wheels_dir=wheels,
-        models=setup_gemma_model_registry(api_base=args.api_base, api_key=key,
+        models=setup_gemma_model_registry(api_base=proxy.api_base, api_key=key,
                                          served_model=args.model, num_retries=2),
         task_ids=[task.instance_id], sandbox='docker', image='swebench-sandbox:latest',
         max_tool_calls=args.max_tool_calls, max_time_minutes=args.max_minutes,
@@ -176,16 +182,25 @@ async def run_one(args, working, agent_dir, key, task, index, total):
     task_results.mkdir(parents=True, exist_ok=True)
     print(f'[{index}/{total}] Running {task.instance_id} with remote model {args.model}; '
           'workspaces/tests run locally.', flush=True)
-    result = await Evaluator(config).evaluate_task(task=task, task_index=index, total_tasks=total)
-    (task_results / f'{task.instance_id}.patch').write_text(result.agent_patch or '')
-    (task_results / f'{task.instance_id}.json').write_text(
-        result.model_dump_json(indent=2, exclude={'trace'}))
-    summary = {'task_id': task.instance_id, 'resolved': result.resolved,
-               'test_exit_code': result.test_exit_code,
-               'patch_chars': len(result.agent_patch or ''), 'tool_calls': result.tool_calls,
-               'error': result.error_message}
-    print(json.dumps(summary), flush=True)
-    return summary
+    try:
+        result = await Evaluator(config).evaluate_task(task=task, task_index=index, total_tasks=total)
+        (task_results / f'{task.instance_id}.patch').write_text(result.agent_patch or '')
+        (task_results / f'{task.instance_id}.json').write_text(
+            result.model_dump_json(indent=2, exclude={'trace'}))
+        summary = {'task_id': task.instance_id, 'resolved': result.resolved,
+                   'test_exit_code': result.test_exit_code,
+                   'patch_chars': len(result.agent_patch or ''), 'tool_calls': result.tool_calls,
+                   'error': result.error_message}
+        print(json.dumps(summary), flush=True)
+        return summary
+    finally:
+        proxy.stop()
+        final = {'result': result.model_dump(mode='json', exclude={'trace'}) if 'result' in locals() else None}
+        proxy.write_trace(
+            task_logs / 'model_trace.json',
+            run={'task_id': task.instance_id, 'upstream_api_base': args.api_base},
+            final=final,
+        )
 
 
 async def run(args, working):
@@ -249,7 +264,6 @@ async def run(args, working):
 if __name__ == '__main__':
     load_dotenv(ROOT / '.env')
     args = arguments()
-    run_started = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     # Avoid the harness's stale global unpacked-wheel cache.
     with tempfile.TemporaryDirectory(prefix='gemma-pipeline-') as tmp:
         previous = tempfile.tempdir
@@ -259,17 +273,18 @@ if __name__ == '__main__':
         finally:
             tempfile.tempdir = previous
     if not args.skip_langfuse:
-        session_id = args.langfuse_session_id or f'vllm-{args.split}-{run_started}'
         upload_ids = [task_id for task_id in args.task_ids
                       if (args.logs / task_id / 'traces' / f'trace_{task_id}.json').is_file()]
         if not upload_ids:
             print('Langfuse upload skipped: no ATIF trace was generated.', flush=True)
         for task_id in upload_ids:
             task_logs = args.logs / task_id
+            task_heading = f'{task_id}-itr-{args.iteration}'
             push_to_langfuse(
                 artifact_dir=task_logs,
                 results_dir=task_logs / 'results',
                 task_ids=[task_id],
-                session_id=session_id,
+                session_id=args.langfuse_session_id or task_heading,
+                trace_name=task_heading,
                 source_platform='vllm',
             )

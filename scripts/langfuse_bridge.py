@@ -43,6 +43,7 @@ def push_to_langfuse(
     kaggle_kernel: str | None = None,
     task_ids: list[str] | None = None,
     session_id: str | None = None,
+    trace_name: str | None = None,
     source_platform: str,
     env_file: Path = ROOT / ".env",
 ) -> bool:
@@ -71,6 +72,8 @@ def push_to_langfuse(
         command.extend(["--results-dir", str(results_dir.resolve())])
     if session_id:
         command.extend(["--session-id", session_id])
+    if trace_name:
+        command.extend(["--trace-name", trace_name])
     for task_id in task_ids or []:
         command.extend(["--task-id", task_id])
 

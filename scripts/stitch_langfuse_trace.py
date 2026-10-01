@@ -112,6 +112,10 @@ def arguments() -> argparse.Namespace:
         help="Langfuse session ID; defaults to <source-platform>-run-<artifact label>",
     )
     parser.add_argument(
+        "--trace-name",
+        help="Name for the Langfuse root trace (for example, fastapi_11355-itr-1)",
+    )
+    parser.add_argument(
         "--include-console-log",
         action="store_true",
         help="Upload the notebook console log as an observation (disabled by default)",
@@ -525,6 +529,7 @@ def upload_run(
     run_label: str,
     source_platform: str,
     session_id: str,
+    trace_name: str | None,
     traces: list[tuple[Path, dict[str, Any]]],
     log_path: Path | None,
     events: list[dict[str, Any]],
@@ -532,7 +537,7 @@ def upload_run(
 ) -> tuple[str, str, list[dict[str, Any]], int, int]:
     summaries: list[dict[str, Any]] = []
     total_agents = total_tools = 0
-    run_name = (
+    run_name = trace_name or (
         f"kaggle-notebook-run-{run_label}"
         if source_platform == "kaggle"
         else f"{source_platform}-agent-run-{run_label}"
@@ -673,6 +678,7 @@ def main() -> None:
         run_label=run_label,
         source_platform=source_platform,
         session_id=session_id,
+        trace_name=args.trace_name,
         traces=traces,
         log_path=log_path,
         events=events,

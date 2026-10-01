@@ -244,7 +244,7 @@ Run an entire split or select several task IDs; comma-separated IDs also work:
 .venv/bin/python scripts/task_pipeline.py --val --task-ids <task-id-1>,<task-id-2>
 ```
 
-Defaults allow 50 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
+Defaults allow 25 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
 
 ### Launch Kaggle, download its output, and upload its trace
 
