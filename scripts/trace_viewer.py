@@ -75,35 +75,50 @@ def main() -> None:
     trace_root = site_root / 'logs' / 'remote'
     splits = ('train', 'dev', 'val')
 
-    def available_iterations() -> list[Path]:
-        if not trace_root.is_dir():
-            return []
-        return sorted(
-            path for path in trace_root.iterdir()
-            if path.is_dir() and path.name.startswith('iteration-')
-        )
+    def available_iterations() -> list[str]:
+        found = set()
+        for split in splits:
+            split_dir = trace_root / split
+            if not split_dir.is_dir():
+                continue
+            for task_dir in split_dir.iterdir():
+                trace_path = task_dir / 'model_trace.json'
+                if not task_dir.is_dir() or not trace_path.is_file():
+                    continue
+                try:
+                    trace = json.loads(trace_path.read_text(encoding='utf-8'))
+                    iteration = trace.get('run', {}).get('iteration', 1)
+                    found.add(f'iteration-{int(iteration)}')
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    found.add('iteration-1')
+        return sorted(found)
 
-    def available_traces() -> dict[str, dict[str, list[str]]]:
-        def task_entry(task_dir: Path) -> dict[str, object]:
+    def available_traces() -> dict[str, dict[str, list[dict[str, object]]]]:
+        def task_entry(iteration_name: str, split: str, task_dir: Path) -> dict[str, object] | None:
             resolved = None
             try:
                 trace = json.loads((task_dir / 'model_trace.json').read_text(encoding='utf-8'))
+                iteration = int(trace.get('run', {}).get('iteration', 1))
                 value = trace.get('final', {}).get('result', {}).get('resolved')
                 resolved = value if isinstance(value, bool) else None
             except (OSError, json.JSONDecodeError, AttributeError):
-                pass
-            return {'task_id': task_dir.name, 'resolved': resolved}
+                iteration = 1
+            except (TypeError, ValueError):
+                iteration = 1
+            return ({'task_id': task_dir.name, 'resolved': resolved,
+                     'trace_path': f'logs/remote/{split}/{task_dir.name}/model_trace.json'}
+                    if f'iteration-{iteration}' == iteration_name else None)
 
         return {
-            iteration.name: {
-                split: [task_entry(task_dir) for task_dir in sorted(
+            iteration_name: {
+                split: [entry for entry in (task_entry(iteration_name, split, task_dir) for task_dir in sorted(
                     task_dir
-                    for task_dir in (iteration / split).iterdir()
+                    for task_dir in (trace_root / split).iterdir()
                     if task_dir.is_dir() and (task_dir / 'model_trace.json').is_file()
-                )] if (iteration / split).is_dir() else []
+                )) if entry is not None] if (trace_root / split).is_dir() else []
                 for split in splits
             }
-            for iteration in available_iterations()
+            for iteration_name in available_iterations()
         }
 
     class Handler(SimpleHTTPRequestHandler):

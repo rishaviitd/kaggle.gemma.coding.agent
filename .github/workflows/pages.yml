@@ -6,6 +6,7 @@ on:
     paths:
       - index.html
       - presentation/**
+      - logs/remote/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -34,6 +35,39 @@ jobs:
           cp -R presentation _site/presentation
           mkdir -p _site/data
           cp data/tasks.jsonl _site/data/tasks.jsonl
+          mkdir -p _site/logs
+          cp -R logs/remote _site/logs/remote
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("logs/remote")
+          site = Path("_site")
+          iterations = {}
+          for split in ("train", "dev", "val"):
+              for trace_path in sorted((root / split).glob("*/model_trace.json")):
+                  try:
+                      trace = json.loads(trace_path.read_text(encoding="utf-8"))
+                  except (OSError, json.JSONDecodeError):
+                      continue
+                  task_id = trace.get("run", {}).get("task_id", trace_path.parent.name)
+                  try:
+                      iteration = int(trace.get("run", {}).get("iteration", 1))
+                  except (TypeError, ValueError):
+                      iteration = 1
+                  key = f"iteration-{iteration}"
+                  result = trace.get("final", {}).get("result", {})
+                  resolved = result.get("resolved") if isinstance(result, dict) else None
+                  iterations.setdefault(key, {name: [] for name in ("train", "dev", "val")})[split].append({
+                      "task_id": task_id,
+                      "resolved": resolved if isinstance(resolved, bool) else None,
+                      "trace_path": trace_path.as_posix(),
+                  })
+          (site / "trace-index.json").write_text(
+              json.dumps({"iterations": iterations}, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
           sed -i "s/__BUILD_VERSION__/${GITHUB_SHA}/g" _site/index.html
       - name: Configure Pages
         uses: actions/configure-pages@v5
