@@ -47,7 +47,8 @@ def arguments():
     p.add_argument('--embeddings', type=Path, help='Override the task embeddings path.')
     p.add_argument('--wheels', type=Path, help='Override the task wheel-cache path.')
     p.add_argument('--submission', type=Path, default=ROOT / 'src')
-    p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/'))
+    # p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/'))
+    p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'http://127.0.0.1:18001/v1'))
     p.add_argument('--model', default='gemma4')
     p.add_argument('--iteration', type=int, default=1,
                    help='Experiment iteration number used in Langfuse task names.')

@@ -161,11 +161,13 @@ The launchers fetch Kaggle CLI 2.2.4 with `uvx`, and the post-run importer runs 
 Python 3.12 is needed for local evaluation. Restore the environment from the lockfile:
 
 ```bash
-uv venv --python 3.12 .venv
+uv venv --python 3.12.8 .venv
 uv pip install --python .venv/bin/python -r requirements.lock.txt
 ```
 
-Start Docker Desktop and build the sandbox image:
+`requirements.in` lists the direct local requirements; `requirements.lock.txt` pins their resolved dependencies. Use this project `.venv` for local agent and harness commands. The organizer's `swegemma` package requires some model libraries even when inference runs on a remote server; these dependencies are included, but no local model server or GPU runtime is configured.
+
+Start Docker Desktop and build the sandbox image, pinned to Python 3.13.15:
 
 ```bash
 docker build --platform linux/amd64 -t swebench-sandbox:latest -f data/docker/Dockerfile.sandbox data/docker
