@@ -48,7 +48,12 @@ function formattedOutput(o){
  for(const c of (o?.tool_calls||[])) s.push(`TOOL CALL: ${c.name}\\n${c.arguments_raw_json||JSON.stringify(c.arguments||{})}`);
  return s.join('\\n\\n')||'(no text output)';
 }
-function formattedTools(xs){return (xs||[]).map(x=>`TOOL RESULT${x.name?' — '+x.name:''}\\n${typeof x.content==='string'?x.content:JSON.stringify(x.content)}`).join('\\n\\n')||'(none)';}
+function formatToolOutput(output){
+ if(typeof output==='string') return output;
+ if(!output||typeof output!=='object'||Array.isArray(output)) return JSON.stringify(output,null,2);
+ return Object.entries(output).map(([key,value])=>`${key.toUpperCase()}\\n${typeof value==='string'?value:JSON.stringify(value,null,2)}`).join('\\n\\n');
+}
+function formattedTools(xs){return (xs||[]).map(x=>`TOOL RESULT${x.name?' — '+x.name:''}\\n${formatToolOutput(x.output??x.content??x.output_raw_json??'')}`).join('\\n\\n')||'(none)';}
 function block(label, cls, formatted, value){return `<h3>${label}</h3><button data-mode="formatted">Formatted</button><button data-mode="raw">Raw JSON</button><pre class="${cls} formatted">${pretty(formatted)}</pre><pre class="${cls} raw" hidden>${esc(raw(value))}</pre>`}
 fetch('/trace.json').then(r=>r.json()).then(t=>{
  document.querySelector('#title').textContent=`${t.run?.task_id||'trace'} — ${t.turns.length} model turns`;
