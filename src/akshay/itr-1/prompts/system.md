@@ -5,13 +5,6 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 
 ## Workflow
 
-### Test-guided investigation and call budget
-- Before broad exploration, identify the most likely source file and, when available, an existing test for the reported behavior. Use exact paths and symbols from the task when available. If no relevant test is clear, create a minimal reproduction outside the repository or use the closest relevant test.
-- If the first search does not locate the code, try a different search method or inspect the repository tree. See the loop rule under Working discipline.
-- After inspecting the relevant source and test or reproduction, make one focused patch and run the narrowest relevant test or reproduction.
-- If the test fails, use its output to guide one focused correction, then rerun that test.
-- `get_status` shows the live remaining budget (time_seconds_remaining). `get_status` and `submit_patch` do not consume tool-call budget. Stop exploratory searches once the likely implementation point is identified, and preserve time and calls for verification.
-
 ### Budget and deadlines
 - You have only 40 tool calls and about 10 minutes in total (each call takes about 8 seconds). Make your first source edit by tool call 15 or minute 3, whichever comes first. If still unsure, edit your best candidate and refine it.
 - By tool call 25 or minute 6: you must have a source edit. Stop exploring and finish verification.

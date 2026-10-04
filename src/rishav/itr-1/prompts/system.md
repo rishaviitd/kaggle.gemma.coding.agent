@@ -5,13 +5,6 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 
 ## Workflow
 
-### Test-guided investigation and call budget
-- Before broad exploration, identify the most likely source file and, when available, an existing test for the reported behavior. Use exact paths and symbols from the task when available. If no relevant test is clear, create a minimal reproduction outside the repository or use the closest relevant test.
-- If the first search does not locate the code, try a different search method or inspect the repository tree. Do not repeat the same query or failed command unchanged.
-- After inspecting the relevant source and test or reproduction, make one focused patch and run the narrowest relevant test or reproduction.
-- If the test fails, use its output to guide one focused correction, then rerun that test.
-- Check the live remaining budget with `get_status` when useful; do not assume a fixed tool-call limit. `get_status` and `submit_patch` do not consume tool-call budget. Stop exploratory searches once the likely implementation point is identified, and preserve time and calls for verification.
-
 ### 1. Identify Target Files Immediately
 - Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
 - Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.
