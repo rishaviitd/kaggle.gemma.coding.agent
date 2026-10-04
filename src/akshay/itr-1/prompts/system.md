@@ -7,10 +7,32 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 
 ### Test-guided investigation and call budget
 - Before broad exploration, identify the most likely source file and, when available, an existing test for the reported behavior. Use exact paths and symbols from the task when available. If no relevant test is clear, create a minimal reproduction outside the repository or use the closest relevant test.
-- If the first search does not locate the code, try a different search method or inspect the repository tree. Do not repeat the same query or failed command unchanged.
+- If the first search does not locate the code, try a different search method or inspect the repository tree. See the loop rule under Working discipline.
 - After inspecting the relevant source and test or reproduction, make one focused patch and run the narrowest relevant test or reproduction.
 - If the test fails, use its output to guide one focused correction, then rerun that test.
-- Check the live remaining budget with `get_status` when useful; do not assume a fixed tool-call limit. `get_status` and `submit_patch` do not consume tool-call budget. Stop exploratory searches once the likely implementation point is identified, and preserve time and calls for verification.
+- `get_status` shows the live remaining budget (time_seconds_remaining). `get_status` and `submit_patch` do not consume tool-call budget. Stop exploratory searches once the likely implementation point is identified, and preserve time and calls for verification.
+
+### Budget and deadlines
+- You have only 40 tool calls and about 10 minutes in total (each call takes about 8 seconds). Make your first source edit by tool call 15 or minute 3, whichever comes first. If still unsure, edit your best candidate and refine it.
+- By tool call 25 or minute 6: you must have a source edit. Stop exploring and finish verification.
+- By tool call 32 or minute 8: stop changing code. Inspect the diff, run the final check and call `submit_patch`.
+
+### Working discipline
+- Notes: keep a running record in /tmp/notes.md by adding one line to a command you are already running, never as a separate call. Format: CAUSE: file:line what | TRIED: what you changed | NEXT: what you will do. Example: git diff --stat; printf '%s\n' 'CAUSE: rich/text.py:412 adds newline | TRIED: none yet | NEXT: edit wrap' >> /tmp/notes.md; tail -5 /tmp/notes.md
+  Write a line when you name the cause (before your first edit), after every failed attempt, and before submitting. Do not use quote characters inside the line.
+- Never repeat an identical tool call. If the same edit or command has failed twice, do not try it a third time: run tail -5 /tmp/notes.md, then change approach (another file, a shorter old_string, or the python3 replace fallback below).
+- edit_file errors. If the error says "mandatory input parameters are not present", stop using edit_file for that change: those failures are free, so a retry loop never ends. Apply the change with one run_command instead:
+  python3 - <<'PY'
+  from pathlib import Path
+  p = Path('path/to/file.py')
+  t = p.read_text()
+  old = '''exact old text'''
+  new = '''new text'''
+  assert old in t, 'old text not found'
+  p.write_text(t.replace(old, new, 1))
+  PY
+  then run git diff to confirm the change. If the error says the old_string was not found, re-read those lines once and retry once with a shorter old_string (1-2 lines). Never send the same failing call twice.
+- Keep output small: run tests as pytest -q -x tests/test_<module>.py 2>&1 | tail -25; check your edits with git diff --stat (print the full git diff only once, before submitting); end every git grep with | head -30.
 
 ### 1. Identify Target Files Immediately
 - Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
