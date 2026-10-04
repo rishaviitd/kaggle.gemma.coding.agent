@@ -44,7 +44,9 @@ data/
   docker/ sandbox/        Evaluation container and sandbox setup
 src/                     Agent submission: YAML, prompts, tools, skills, and adapters
 scripts/                 Split planning, wheel building, evaluation, and inference pipeline
-logs/remote/<split>/<task_id>/   Per-task logs/, traces/, results/, and checks/
+logs/remote/
+  base/<split>/<task_id>/          Baseline artifacts; train includes failure analysis.md
+  iteration-<n>/<split>/<task_id>/  Per-task logs/, traces/, results/, and checks/
 notebooks/                Kaggle inference notebook
 presentation/             Project presentation source
 ```
@@ -123,7 +125,7 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 | `load_skill_resource`      | Read a knowledge file from a skill attached to the agent. |
 | `run_skill_script`         | Run an attached skill's script inside the task sandbox.   |
 
-Skill tools are available when skills are declared in the agent YAML; this repository does not currently configure any skills.
+The submission configures the `repo-navigation` skill. Its instructions are available through the harness skill tools.
 
 ![Competition tool usage diagram](assets/tool.usage.png)
 
@@ -181,10 +183,10 @@ Keep physical assets in one place under `data/assets/`: snapshots, graphs, embed
 
 ```bash
 python3 scripts/plan_task_splits.py --materialize
-bash scripts/build_split_wheels.sh
+bash scripts/shell/build_split_wheels.sh
 ```
 
-The planner accepts the organizer's `graphs/` folder or the older root-level asset folders and consolidates their files under `data/assets/`. Wheel caches are stored in `data/assets/task_wheels/<task_id>/`; the builder skips any task that already has wheels.
+The planner accepts the organizer's `graphs/` folder or the older root-level asset folders and consolidates their files under `data/assets/`. Wheel caches are stored in `data/assets/task_wheels/<task_id>/`; the builder replaces each cache from scratch using the task's declared dependencies.
 
 Task wheels target **Python 3.13 on Linux amd64**, matching the sandbox; the host environment uses Python 3.12. The builder repairs incompatible cached wheels before skipping existing caches. To repair caches independently, preserving existing files:
 
@@ -198,10 +200,10 @@ After repair, verify a saved agent patch without calling the model again:
 
 ```bash
 .venv/bin/python scripts/evaluate.py --task-id fastapi_14786 \
-  --patch-file logs/remote/train/fastapi_14786/results/fastapi_14786.patch
+  --patch-file logs/remote/base/train/fastapi_14786/results/fastapi_14786.patch
 ```
 
-Reverification results are saved beside the task at `logs/remote/<split>/<task_id>/checks/reverification/result.json`. Existing agent traces retain the environment errors the model saw; repeat inference with repaired caches when measuring agent behavior.
+The standalone evaluator saves reverification results at `logs/remote/<split>/<task_id>/checks/reverification/result.json`. Pipeline artifacts are organized separately under `logs/remote/base/` and `logs/remote/iteration-<n>/`.
 
 ### Verify the reference fix
 
@@ -233,17 +235,19 @@ Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 
 ```bash
 .venv/bin/python scripts/task_pipeline.py --val --task-id fastapi_11194 \
+  --iteration 1 \
   --api-base https://your-model-server/v1 --model gemma4
 ```
 
-Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split dev`, or `--split val`). The task must belong to that split. Its task list and asset paths are resolved from the split manifest. Each task writes to `logs/remote/<split>/<task_id>/`: `traces/` holds its ATIF trace, `logs/` holds console output, and `results/` holds its patch and evaluation JSON. For example, `logs/remote/train/fastapi_14258/traces/trace_fastapi_14258.json` matches `logs/remote/train/fastapi_14258/results/fastapi_14258.json` and `.patch`. Tasks can run in parallel terminals without creating batch folders. Rerunning a task replaces that task's previous artifacts. If Langfuse is configured, each completed task trace and evaluation result is uploaded under the same `vllm-<split>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
+Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split dev`, or `--split val`) and set `--iteration N` (default: `1`). The task must belong to that split. Its task list and asset paths are resolved from the split manifest. Each task writes to `logs/remote/iteration-N/<split>/<task_id>/`: `traces/` holds its ATIF trace, `logs/` holds console output, and `results/` holds its patch and evaluation JSON. For example, `logs/remote/iteration-1/train/fastapi_14258/traces/trace_fastapi_14258.json` matches its result JSON and patch. Tasks can run in parallel terminals without creating batch folders. Rerunning a task within the same iteration replaces that task's previous artifacts. If Langfuse is configured, each completed task trace and evaluation result is uploaded under the same `vllm-<split>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.
 
 Run an entire split or select several task IDs; comma-separated IDs also work:
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --train --all
-.venv/bin/python scripts/task_pipeline.py --dev --task-ids <task-id-1> <task-id-2>
-.venv/bin/python scripts/task_pipeline.py --val --task-ids <task-id-1>,<task-id-2>
+.venv/bin/python scripts/task_pipeline.py --train --all --iteration 1
+.venv/bin/python scripts/task_pipeline.py --dev --all --iteration 1
+.venv/bin/python scripts/task_pipeline.py --dev --task-ids <task-id-1> <task-id-2> --iteration 1
+.venv/bin/python scripts/task_pipeline.py --val --task-ids <task-id-1>,<task-id-2> --iteration 1
 ```
 
 Defaults allow 25 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
@@ -305,5 +309,8 @@ The automatic download covers the completed notebook's output artifacts and log.
 ├── requirements.lock.txt   Python dependencies
 ├── data/                   Local task assets (ignored)
 ├── wheelhouse/             Organizer wheels (ignored)
-└── results/                Patches, logs, traces, and results (ignored)
+└── logs/remote/
+    ├── base/               Original train, dev, and val artifacts
+    │   └── train/failure analysis.md
+    └── iteration-<n>/      Pipeline artifacts for each experiment
 ```

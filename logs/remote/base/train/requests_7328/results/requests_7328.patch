@@ -1,0 +1,176 @@
+diff --git a/repro_issue.py b/repro_issue.py
+new file mode 100644
+index 00000000..a915bf17
+--- /dev/null
++++ b/repro_issue.py
+@@ -0,0 +1,58 @@
++import requests
++from requests import Session
++from requests.adapters import HTTPAdapter
++from requests.structures import CaseInsensitiveDict
++from unittest.mock import MagicMock
++
++def test_redirect_history():
++    class MockResponse:
++        def __init__(self, url, status_code):
++            self.url = url
++            self.status_code = status_code
++            self.history = []
++            self.headers = CaseInsensitiveDict()
++            self.raw = MagicMock()
++        
++        def close(self):
++            pass
++        
++        @property
++        def content(self):
++            return b""
++
++        @property
++        def is_redirect(self):
++            return 300 <= self.status_code < 400
++
++    adapter = HTTPAdapter()
++    
++    r1 = MockResponse("http://example.com/1", 301)
++    r1.headers['Location'] = 'http://example.com/2'
++    r2 = MockResponse("http://example.com/2", 301)
++    r2.headers['Location'] = 'http://example.com/3'
++    r3 = MockResponse("http://example.com/3", 200)
++    r3.headers = CaseInsensitiveDict()
++    
++    adapter.send = MagicMock(side_effect=[r1, r2, r3])
++    
++    s = Session()
++    s.mount('http://', adapter)
++    
++    resp = s.get('http://example.com/1', allow_redirects=True)
++    
++    print(f"Final response URL: {resp.url}")
++    print(f"History length: {len(resp.history)}")
++    for i, h in enumerate(resp.history):
++        print(f"History[{i}] URL: {h.url}")
++        print(f"History[{i}] history: {h.history}")
++
++    # Check for self-reference in history
++    for h in resp.history:
++        if h in h.history:
++            print("SELF REFERENCE FOUND!")
++            return
++
++    print("No self-reference found.")
++
++if __name__ == "__main__":
++    test_redirect_history()
+diff --git a/repro_issue.py` b/repro_issue.py`
+new file mode 100644
+index 00000000..9883a5ee
+--- /dev/null
++++ b/repro_issue.py`
+@@ -0,0 +1,93 @@
++import requests
++from requests import Session
++
++def test_redirect_history():
++    # We need a way to simulate redirects. 
++    # Since we don't have a server, we can mock the send method.
++    
++    class MockResponse:
++        def __init__(self, url, status_code):
++            self.url = url
++            self.status_code = status_code
++            self.history = []
++            self.raw = None
++        
++        def close(self):
++            pass
++
++    class MockSession(Session):
++        def __init__(self):
++            Session.__init__(self)
++            self.call_count = 0
++            self.responses = [
++                MockResponse("http://example.com/1", 301),
++                MockResponse("http://example.com/2", 301),
++                MockResponse("http://example.com/3", 200),
++            ]
++
++        def send(self, request, **kwargs):
++            self.call_count += 1
++            resp = self.responses[self.call_count - 1]
++            
++            # Simulate redirect target
++            if resp.status_code == 301:
++                # This is a bit hacky, but we need get_redirect_target to work
++                # We can mock it or just make sure the response has a location header
++                # But get_redirect_target uses resp.headers['Location']
++                resp.headers = {'Location': f"http://example.com/{self.call_count + 1}"}
++            else:
++                resp.headers = {}
++            
++            return resp
++
++    s = MockSession()
++    # We need a request object
++    from requests import Request
++    req = Request('GET', 'http://example.com/1').prepare()
++    
++    # We call send with allow_redirects=True
++    # Note: we need to mock get_redirect_target because it's used by resolve_redirects
++    # and it expects a real response object with headers.
++    
++    # Let's just use a real session and mock the adapter.
++    # Or even simpler, just mock the resolve_redirects and see what happens.
++    # But we want to test the actual implementation.
++
++    # Let's try to use a real session and a mock adapter.
++    from requests.adapters import HTTPAdapter
++    from unittest.mock import MagicMock
++
++    adapter = HTTPAdapter()
++    adapter.send = MagicMock()
++    
++    # Setup the mock responses
++    r1 = MockResponse("http://example.com/1", 301)
++    r1.headers = {'Location': 'http://example.com/2'}
++    r2 = MockResponse("http://example.com/2", 301)
++    r2.headers = {'Location': 'http://example.com/3'}
++    r3 = MockResponse("http://example.com/3", 200)
++    r3.headers = {}
++    
++    adapter.send.side_effect = [r1, r2, r3]
++    
++    s = Session()
++    s.mount('http://', adapter)
++    
++    resp = s.get('http://example.com/1', allow_redirects=True)
++    
++    print(f"Final response URL: {resp.url}")
++    print(f"History length: {len(resp.history)}")
++    for i, h in enumerate(resp.history):
++        print(f"History[{i}] URL: {h.url}")
++        print(f"History[{i}] history: {h.history}")
++
++    # Check for self-reference in history
++    for h in resp.history:
++        if h in h.history:
++            print("SELF REFERENCE FOUND!")
++            return
++
++    print("No self-reference found.")
++
++if __name__ == "__main__":
++    test_redirect_history()
+diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+index 578cc44d..d2180f80 100644
+--- a/src/requests/sessions.py
++++ b/src/requests/sessions.py
+@@ -181,7 +181,7 @@ class SessionRedirectMixin:
+             # Update history and keep track of redirects.
+             # resp.history must ignore the original request in this loop
+             hist.append(resp)
+-            resp.history = hist[1:]
++            resp.history = hist[:-1]
+ 
+             try:
+                 resp.content  # Consume socket so it can be released

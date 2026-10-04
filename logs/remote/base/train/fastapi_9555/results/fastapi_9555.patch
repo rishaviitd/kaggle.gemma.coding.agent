@@ -1,0 +1,112 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index fbb666a7..cdaf6321 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -77,25 +77,28 @@ class Dependant:
+ 
+     @cached_property
+     def is_gen_callable(self) -> bool:
+-        if inspect.isgeneratorfunction(self.call):
++        call = inspect.unwrap(self.call)
++        if inspect.isgeneratorfunction(call):
+             return True
+-        dunder_call = getattr(self.call, "__call__", None)  # noqa: B004
++        dunder_call = getattr(call, "__call__", None)  # noqa: B004
+         return inspect.isgeneratorfunction(dunder_call)
+ 
+     @cached_property
+     def is_async_gen_callable(self) -> bool:
+-        if inspect.isasyncgenfunction(self.call):
++        call = inspect.unwrap(self.call)
++        if inspect.isasyncgenfunction(call):
+             return True
+-        dunder_call = getattr(self.call, "__call__", None)  # noqa: B004
++        dunder_call = getattr(call, "__call__", None)  # noqa: B004
+         return inspect.isasyncgenfunction(dunder_call)
+ 
+     @cached_property
+     def is_coroutine_callable(self) -> bool:
+-        if inspect.isroutine(self.call):
+-            return iscoroutinefunction(self.call)
+-        if inspect.isclass(self.call):
++        call = inspect.unwrap(self.call)
++        if inspect.isroutine(call):
++            return iscoroutinefunction(call)
++        if inspect.isclass(call):
+             return False
+-        dunder_call = getattr(self.call, "__call__", None)  # noqa: B004
++        dunder_call = getattr(call, "__call__", None)  # noqa: B004
+         return iscoroutinefunction(dunder_call)
+ 
+     @cached_property
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..f89e7565
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,65 @@
++
++from functools import cache
++from functools import wraps
++from typing import Awaitable
++from typing import Callable
++from typing import Generic
++from typing import Iterator
++from typing import ParamSpec
++from typing import TypeVar
++
++from fastapi import Depends
++from fastapi import FastAPI
++from pydantic import BaseModel
++
++P = ParamSpec('P')
++T = TypeVar('T')
++
++# Based off https://github.com/python/cpython/issues/90780#issuecomment-1093943964
++class Reawaitable(Generic[T]):
++    __sentinel = object()
++
++    def __init__(self, awaitable: Awaitable[T]) -> None:
++        self.awaitable = awaitable
++        self.result = self.__sentinel
++
++    def __await__(self) -> Iterator[T]:
++        if self.result is self.__sentinel:
++            self.result = yield from self.awaitable.__await__()
++        return self.result
++
++def reawaitable(func: Callable[P, Awaitable[T]]) -> Callable[P, Reawaitable[T]]:
++    @wraps(func)
++    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Reawaitable[T]:
++        return Reawaitable(func(*args, **kwargs))
++    return wrapper
++
++class Settings(BaseModel):
++    foo: str = 'bar'
++
++app = FastAPI()
++
++@cache
++@reawaitable
++async def get_settings() -> Settings:
++    return Settings()
++
++@app.get('/foo')
++async def foo(settings: Settings = Depends(get_settings)) -> str:
++    return settings.foo
++
++if __name__ == "__main__":
++    from fastapi.testclient import TestClient
++    client = TestClient(app)
++    try:
++        response = client.get('/foo')
++        print(f"Status code: {response.status_code}")
++        print(f"Response body: {response.json()}")
++        assert response.status_code == 200
++        assert response.json() == "bar"
++        print("Test passed!")
++    except Exception as e:
++        print(f"Test failed with error: {e}")
++        import traceback
++        traceback.print_exc()
++        exit(1)

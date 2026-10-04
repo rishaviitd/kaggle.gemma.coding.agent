@@ -1,0 +1,81 @@
+diff --git a/rich/console.py b/rich/console.py
+index 0bdce769..9353a354 100644
+--- a/rich/console.py
++++ b/rich/console.py
+@@ -968,8 +968,13 @@ class Console:
+         # Any other value defaults to auto detect
+         isatty: Optional[Callable[[], bool]] = getattr(self.file, "isatty", None)
+         try:
+-            return False if isatty is None else isatty()
+-        except ValueError:
++            if isatty is not None:
++                return isatty()
++            fd = get_fileno(self.file)
++            if fd is not None:
++                return os.isatty(fd)
++            return False
++        except (ValueError, OSError):
+             # in some situation (at the end of a pytest run for example) isatty() can raise
+             # ValueError: I/O operation on closed file
+             # return False because we aren't in a terminal anymore
+diff --git a/rich/progress.py b/rich/progress.py
+index c2de125a..a0c36b6d 100644
+--- a/rich/progress.py
++++ b/rich/progress.py
+@@ -223,7 +223,17 @@ class _Reader(RawIOBase, BinaryIO):
+         return self.handle.fileno()
+ 
+     def isatty(self) -> bool:
+-        return self.handle.isatty()
++        try:
++            isatty = getattr(self.handle, "isatty", None)
++            if isatty is not None:
++                return isatty()
++            fd = self.fileno()
++            if fd is not None:
++                import os
++                return os.isatty(fd)
++            return False
++        except (ValueError, OSError):
++            return False
+ 
+     @property
+     def mode(self) -> str:
+diff --git a/test_proxy.py b/test_proxy.py
+new file mode 100644
+index 00000000..0ed69daf
+--- /dev/null
++++ b/test_proxy.py
+@@ -0,0 +1,32 @@
++
++import os
++from rich.console import Console
++from io import BytesIO
++
++class ProxyFile(BytesIO):
++    def fileno(self):
++        return os.getpid() # This is not a real fd, but for testing if it's called
++
++def test_proxy_isatty():
++    # We want to see if is_terminal tries to use fileno when isatty is missing
++    # Since we can't easily create a real tty fd in this environment, 
++    # we can mock os.isatty.
++    
++    import unittest.mock as mock
++    
++    with mock.patch("os.isatty", return_value=True) as mock_isatty:
++        proxy = ProxyFile()
++        # Remove isatty if it exists (BytesIO might have it or not)
++        if hasattr(proxy, "isatty"):
++            try:
++                del proxy.isatty
++            except AttributeError:
++                pass
++            
++        console = Console(file=proxy)
++        print(f"Is terminal: {console.is_terminal}")
++        mock_isatty.assert_called()
++
++if __name__ == "__main__":
++    test_proxy_isatty()
++    print("Test passed!")

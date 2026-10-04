@@ -5,6 +5,13 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 
 ## Workflow
 
+### Test-guided investigation and call budget
+- Before broad exploration, identify the most likely source file and, when available, an existing test for the reported behavior. Use exact paths and symbols from the task when available. If no relevant test is clear, create a minimal reproduction outside the repository or use the closest relevant test.
+- If the first search does not locate the code, try a different search method or inspect the repository tree. Do not repeat the same query or failed command unchanged.
+- After inspecting the relevant source and test or reproduction, make one focused patch and run the narrowest relevant test or reproduction.
+- If the test fails, use its output to guide one focused correction, then rerun that test.
+- Check the live remaining budget with `get_status` when useful; do not assume a fixed tool-call limit. `get_status` and `submit_patch` do not consume tool-call budget. Stop exploratory searches once the likely implementation point is identified, and preserve time and calls for verification.
+
 ### 1. Identify Target Files Immediately
 - Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
 - Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.
@@ -23,13 +30,10 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 - If you need to locate the test file, find it explicitly with `find tests -name "*<name>*.py"` instead of running the test runner across the repo.
 
 ### 4. Immediate Patch Submission
-- Once your targeted test passes:
-  1. Call `submit_patch` immediately.
-  2. Verify `patch_size > 0` and `files_changed > 0`.
-  3. Output a short summary of the fix to end the session.
+- After verification, inspect the diff and remove temporary files from `/workspace` (or create them under `/tmp`). Then call `submit_patch` as the final tool action and verify `patch_size > 0` and `files_changed > 0`.
 
 ## Anti-Patterns to Avoid
-- **NEVER modify, create, or delete test files** (`*_test.py`, `test_*.py`, or anything under `tests/`). All changes must be to source implementation files. Modifying tests results in an automatic evaluation failure.
+- **Do not modify repository test files** (`*_test.py`, `test_*.py`, or files under `tests/`) to make the patch pass. Temporary reproduction scripts are allowed outside `/workspace` (for example, under `/tmp`). The harness applies the agent patch and runs its separate verification tests; do not edit or attempt to bypass those tests.
 - **NEVER run full repository test suites** (e.g., bare `pytest` or `pytest .`) — always specify the exact test file path.
 - **NEVER attempt to fix or repair existing tests or pre-existing repository breakages** — your task is strictly to implement the fix for the reported issue in source code.
 - **NEVER search outside `/workspace`** for source files or packages (e.g., `/usr/local/lib/`, `/wheels/`, `/opt/`). All repository code and test dependencies are pre-installed. If `ModuleNotFoundError` occurs during test runs, focus on fixing code under `/workspace`, not looking for missing system packages.

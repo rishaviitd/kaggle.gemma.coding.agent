@@ -1,0 +1,148 @@
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..e36a4132 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -1,7 +1,8 @@
+ from __future__ import annotations
+ 
++import unicodedata
+ from functools import lru_cache
+-from typing import Callable
++from typing import Callable, Generator
+ 
+ from ._cell_widths import CELL_WIDTHS
+ 
+@@ -30,6 +31,49 @@ _SINGLE_CELLS = frozenset(
+ _is_single_cell_widths: Callable[[str], bool] = _SINGLE_CELLS.issuperset
+ 
+ 
++def is_continuation(char: str) -> bool:
++    """Return True if the character is a combining mark or ZWJ."""
++    return (
++        unicodedata.category(char).startswith("M")
++        or char == "\u200d"
++    )
++
++
++def is_regional_indicator(char: str) -> bool:
++    """Return True if the character is a regional indicator."""
++    return "\u1F1E6" <= char <= "\u1F1FF"
++
++
++def graphemes(text: str) -> Generator[str, None, None]:
++    """Yield graphemes from the given text."""
++    if not text:
++        return
++
++    current_grapheme = ""
++    for char in text:
++        if not current_grapheme:
++            current_grapheme = char
++            continue
++
++        if is_continuation(char) or current_grapheme[-1] == "\u200d":
++            current_grapheme += char
++            continue
++
++        if (
++            is_regional_indicator(char)
++            and is_regional_indicator(current_grapheme[-1])
++            and sum(1 for c in current_grapheme if is_regional_indicator(c)) == 1
++        ):
++            current_grapheme += char
++            continue
++
++        yield current_grapheme
++        current_grapheme = char
++
++    if current_grapheme:
++        yield current_grapheme
++
++
+ @lru_cache(4096)
+ def cached_cell_len(text: str) -> int:
+     """Get the number of cells required to display text.
+@@ -110,16 +154,18 @@ def set_cell_size(text: str, total: int) -> str:
+     if cell_size < total:
+         return text + " " * (total - cell_size)
+ 
++    # Use graphemes for cropping
++    gs = list(graphemes(text))
+     start = 0
+-    end = len(text)
++    end = len(gs)
+ 
+     # Binary search until we find the right size
+     while True:
+         pos = (start + end) // 2
+-        before = text[: pos + 1]
++        before = "".join(gs[: pos + 1])
+         before_len = cell_len(before)
+-        if before_len == total + 1 and cell_len(before[-1]) == 2:
+-            return before[:-1] + " "
++        if before_len == total + 1 and cell_len(gs[pos]) == 2:
++            return "".join(gs[:pos]) + " "
+         if before_len == total:
+             return before
+         if before_len > total:
+@@ -150,17 +196,17 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
+-        char_doesnt_fit = total_width + cell_width > width
++    for grapheme in graphemes(text):
++        grapheme_width = sum(map(get_character_cell_size, grapheme))
++        char_doesnt_fit = total_width + grapheme_width > width
+ 
+         if char_doesnt_fit:
+-            append_new_line([character])
++            append_new_line([grapheme])
+             append_to_last_line = lines[-1].append
+-            total_width = cell_width
++            total_width = grapheme_width
+         else:
+-            append_to_last_line(character)
+-            total_width += cell_width
++            append_to_last_line(grapheme)
++            total_width += grapheme_width
+ 
+     return ["".join(line) for line in lines]
+ 
+diff --git a/test_graphemes.py b/test_graphemes.py
+new file mode 100644
+index 00000000..1ec8651a
+--- /dev/null
++++ b/test_graphemes.py
+@@ -0,0 +1,30 @@
++from rich.cells import cell_len, set_cell_size, chop_cells
++
++def test_graphemes():
++    # Family emoji: 👨‍👩‍👧‍👦
++    family = "👨‍👩‍👧‍👦"
++    # 👨 (2) + ZWJ (0) + 👩 (2) + ZWJ (0) + 👧 (2) + ZWJ (0) + 👦 (2) = 8
++    print(f"Family width: {cell_len(family)} (expected 8)")
++    
++    # Rainbow flag: 🏳️‍🌈
++    flag = "🏳️‍🌈"
++    # 🏳 (2) + Variation Selector (0) + ZWJ (0) + 🌈 (2) = 4
++    print(f"Flag width: {cell_len(flag)} (expected 4)")
++    
++    # Australia flag: 🇦🇺
++    aus = "🇦🇺"
++    # 🇦 (2) + 🇺 (2) = 4
++    print(f"Australia width: {cell_len(aus)} (expected 4)")
++
++    # Test set_cell_size
++    # Family emoji is 8 cells. If we set size to 7, it should not split the family.
++    print(f"Family set 7: '{set_cell_size(family, 7)}' (len: {len(set_cell_size(family, 7))})")
++    print(f"Family set 8: '{set_cell_size(family, 8)}' (len: {len(set_cell_size(family, 8))})")
++
++    # Test chop_cells
++    # Family emoji (8 cells) in width 7 should be on its own line.
++    print(f"Chop family 7: {chop_cells(family, 7)}")
++    print(f"Chop family 8: {chop_cells(family, 8)}")
++
++if __name__ == "__main__":
++    test_graphemes()

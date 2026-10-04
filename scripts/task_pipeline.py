@@ -51,7 +51,7 @@ def arguments():
     p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'http://127.0.0.1:18001/v1'))
     p.add_argument('--model', default='gemma4')
     p.add_argument('--iteration', type=int, default=1,
-                   help='Experiment iteration number used in Langfuse task names.')
+                   help='Positive experiment number; writes artifacts to logs/remote/iteration-N/<split>.')
     p.add_argument('--max-tool-calls', type=int, default=25)
     p.add_argument('--max-minutes', type=float, default=10)
     p.add_argument('--max-output-tokens', type=int, default=4096)
@@ -64,7 +64,7 @@ def arguments():
     args.tasks = args.tasks or split_dir / 'tasks.jsonl'
     if args.iteration < 1:
         p.error('--iteration must be a positive integer')
-    args.logs = ROOT / 'logs' / 'remote' / args.split
+    args.logs = ROOT / 'logs' / 'remote' / f'iteration-{args.iteration}' / args.split
 
     manifest = split_dir / 'manifest.csv'
     if manifest.is_file():
