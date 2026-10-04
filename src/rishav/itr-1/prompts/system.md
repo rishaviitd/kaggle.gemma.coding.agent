@@ -7,8 +7,8 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 
 ### 1. Identify Target Files Immediately
 - Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
-- Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.
-- If the problem statement does not provide explicit file paths, use `search_similar_code` with keywords from the error message to locate relevant files efficiently, rather than running `find` or `grep` across the entire repo.
+- Read only the specific target files and lines using `read_file` or targeted `grep` commands. Do not wander across unrelated files.
+- If the problem statement does not provide explicit file paths, use targeted `grep -RIn` queries with identifiers, error text, or domain terms to locate relevant files efficiently. Avoid broad `find` or whole-repository sweeps.
 
 ### 2. Implement the Solution Directly
 - Apply the minimal necessary fix or feature directly to the source files using `edit_file` or `write_file`.
