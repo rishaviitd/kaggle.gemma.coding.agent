@@ -86,9 +86,12 @@ def main() -> None:
 
     def available_iterations() -> list[str]:
         return sorted(
-            (path.name for path in trace_root.iterdir()
-             if path.is_dir() and (path.name == 'base' or path.name.startswith('iteration-'))),
-            key=lambda name: (name != 'base', name),
+            (
+                path.relative_to(trace_root).as_posix()
+                for path in trace_root.rglob('*')
+                if path.is_dir() and any((path / split).is_dir() for split in splits)
+            ),
+            key=lambda name: (name != 'base', name.casefold()),
         )
 
     def available_traces() -> dict[str, dict[str, list[dict[str, object]]]]:
@@ -148,7 +151,7 @@ def main() -> None:
                 iteration_name = query.get('iteration', [''])[0]
                 split = query.get('split', [''])[0]
                 task_id = query.get('task_id', [''])[0]
-                valid_iterations = {path.name for path in available_iterations()}
+                valid_iterations = set(available_iterations())
                 if (
                     iteration_name not in valid_iterations
                     or split not in splits
