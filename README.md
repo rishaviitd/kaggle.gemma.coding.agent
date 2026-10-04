@@ -252,6 +252,22 @@ Run an entire split or select several task IDs; comma-separated IDs also work:
 
 Defaults allow 25 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
 
+### Browse model traces
+
+Run the local trace viewer and open `http://127.0.0.1:8765/` to inspect model turns, tool calls, and results:
+
+```bash
+.venv/bin/python scripts/trace_viewer.py
+```
+
+The GitHub Pages UI reads the committed `trace-index.json`. Regenerate it after adding train traces:
+
+```bash
+.venv/bin/python scripts/trace_viewer.py --write-index
+```
+
+The static index includes train traces only by default, matching the artifacts committed under `logs/remote/base/train/`.
+
 ### Launch Kaggle, download its output, and upload its trace
 
 From the repository root, push and monitor the offline competition notebook:
@@ -301,6 +317,7 @@ The automatic download covers the completed notebook's output artifacts and log.
 ├── scripts/
 │   ├── task_pipeline.py    Remote base-model task runner
 │   ├── evaluate.py         Evaluation and reference checks
+│   ├── trace_viewer.py     Local server and static trace-index generator
 │   ├── run_kaggle_notebook.py  Push, follow, download, and import a Kaggle run
 │   ├── langfuse_bridge.py   Shared automatic post-run upload hook
 │   └── stitch_langfuse_trace.py  Validate and import local/Kaggle ATIF artifacts
@@ -309,8 +326,9 @@ The automatic download covers the completed notebook's output artifacts and log.
 ├── requirements.lock.txt   Python dependencies
 ├── data/                   Local task assets (ignored)
 ├── wheelhouse/             Organizer wheels (ignored)
-└── logs/remote/
+├── logs/remote/
     ├── base/               Original train, dev, and val artifacts
     │   └── train/failure analysis.md
     └── iteration-<n>/      Pipeline artifacts for each experiment
+└── trace-index.json        GitHub Pages trace catalogue (train only)
 ```

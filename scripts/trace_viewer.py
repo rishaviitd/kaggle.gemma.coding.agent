@@ -70,56 +70,61 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--trace', type=Path, help='Optional legacy default trace file')
     parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--write-index', action='store_true',
+                        help='Write a static trace-index.json for GitHub Pages.')
+    parser.add_argument('--index-split', choices=('train', 'dev', 'val'), default='train',
+                        help='Split to include when writing a static index (default: train).')
     args = parser.parse_args()
     site_root = Path(__file__).resolve().parent.parent
     trace_root = site_root / 'logs' / 'remote'
     splits = ('train', 'dev', 'val')
 
     def available_iterations() -> list[str]:
-        found = set()
-        for split in splits:
-            split_dir = trace_root / split
-            if not split_dir.is_dir():
-                continue
-            for task_dir in split_dir.iterdir():
-                trace_path = task_dir / 'model_trace.json'
-                if not task_dir.is_dir() or not trace_path.is_file():
-                    continue
-                try:
-                    trace = json.loads(trace_path.read_text(encoding='utf-8'))
-                    iteration = trace.get('run', {}).get('iteration', 1)
-                    found.add(f'iteration-{int(iteration)}')
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    found.add('iteration-1')
-        return sorted(found)
+        return sorted(
+            (path.name for path in trace_root.iterdir()
+             if path.is_dir() and (path.name == 'base' or path.name.startswith('iteration-'))),
+            key=lambda name: (name != 'base', name),
+        )
 
     def available_traces() -> dict[str, dict[str, list[dict[str, object]]]]:
-        def task_entry(iteration_name: str, split: str, task_dir: Path) -> dict[str, object] | None:
+        def task_entry(iteration_name: str, task_dir: Path) -> dict[str, object]:
             resolved = None
             try:
                 trace = json.loads((task_dir / 'model_trace.json').read_text(encoding='utf-8'))
-                iteration = int(trace.get('run', {}).get('iteration', 1))
                 value = trace.get('final', {}).get('result', {}).get('resolved')
                 resolved = value if isinstance(value, bool) else None
-            except (OSError, json.JSONDecodeError, AttributeError):
-                iteration = 1
-            except (TypeError, ValueError):
-                iteration = 1
-            return ({'task_id': task_dir.name, 'resolved': resolved,
-                     'trace_path': f'logs/remote/{split}/{task_dir.name}/model_trace.json'}
-                    if f'iteration-{iteration}' == iteration_name else None)
+            except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                pass
+            split = task_dir.parent.name
+            return {
+                'task_id': task_dir.name,
+                'resolved': resolved,
+                'trace_path': f'logs/remote/{iteration_name}/{split}/{task_dir.name}/model_trace.json',
+            }
 
         return {
             iteration_name: {
-                split: [entry for entry in (task_entry(iteration_name, split, task_dir) for task_dir in sorted(
+                split: [task_entry(iteration_name, task_dir) for task_dir in sorted(
                     task_dir
-                    for task_dir in (trace_root / split).iterdir()
+                    for task_dir in (trace_root / iteration_name / split).iterdir()
                     if task_dir.is_dir() and (task_dir / 'model_trace.json').is_file()
-                )) if entry is not None] if (trace_root / split).is_dir() else []
+                )] if (trace_root / iteration_name / split).is_dir() else []
                 for split in splits
             }
             for iteration_name in available_iterations()
         }
+
+    if args.write_index:
+        index = available_traces()
+        for iteration in index.values():
+            for split in splits:
+                if split != args.index_split:
+                    iteration[split] = []
+        (site_root / 'trace-index.json').write_text(
+            json.dumps({'iterations': index}, indent=2) + '\n',
+            encoding='utf-8',
+        )
+        return
 
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self) -> None:
