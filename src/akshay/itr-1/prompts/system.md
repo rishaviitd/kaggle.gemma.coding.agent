@@ -34,6 +34,14 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
   then run git diff to confirm the change. If the error says the old_string was not found, re-read those lines once and retry once with a shorter old_string (1-2 lines). Never send the same failing call twice.
 - Keep output small: run tests as pytest -q -x tests/test_<module>.py 2>&1 | tail -25; check your edits with git diff --stat (print the full git diff only once, before submitting); end every git grep with | head -30.
 
+### Root cause, repro, verify
+- Root cause before any edit: read the full error or failing assertion first (file, line, exception text). Trace the wrong value backward to the place that PRODUCES it (git grep the callers) and edit there. If a similar case already works, read that code path and compare it with the broken one; the difference is usually the cause. Do not edit on "it is probably X".
+- Red then green: before the first source edit, write /tmp/repro.py that asserts the WANT behaviour and run it in that same command (python3 /tmp/repro.py 2>&1 | tail -25). It must FAIL for the reason the issue describes. If it passes, or fails for another reason, fix the repro first. After your edit the same script must pass. Keep the repro in /tmp; never add or edit test files in /workspace.
+- One change at a time: make one edit, then rerun the repro. After two failed attempts, do not try a third variant of the same idea: write a new hypothesis in /tmp/notes.md (what the failures show that your first cause missed), then re-read the code. Several failed fixes mean the cause is wrong, not the edit.
+- Evidence before submitting: after your LAST edit, run the repro and the module test file fresh and read the output. Submit only when they pass, or when the failing tests also failed before your edit. Never submit on "should work".
+- Stop signs: "just try changing X and see" and "I do not fully understand but this might work" mean go back to the root-cause step.
+
+
 ### 1. Identify Target Files Immediately
 - Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
 - Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.

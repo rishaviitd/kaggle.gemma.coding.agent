@@ -24,6 +24,19 @@ Baseline: the itr-1 files as first committed on `main` (commit `c187b64`): the o
 | C8 | Deadlines tightened for 40 calls: first edit by call 15 / minute 3; checkpoints at 25 and 32 / minutes 6 and 8 | prompt | P1, P20 |
 | C9 | Loop rule: same edit or command failed twice -> read notes and change approach | prompt | P13, P2 |
 
+## Changes from the superpowers skills (S)
+
+These are not in the experiments catalog. They are condensed from the skills in `~/.cline/skills/` and added to the same `Root cause, repro, verify` section of `prompts/system.md`. Not run yet.
+
+| ID | Change | Source skill | Targets |
+|---|---|---|---|
+| S1 | Root cause before any edit: read the full error, trace the wrong value back to where it is produced, compare with a working code path; no edit on a guess | systematic-debugging (phase 1 and 2) | P8 |
+| S2 | Red then green: write /tmp/repro.py asserting WANT and run it in the same command before the first edit; it must fail for the issue's reason, then pass after the edit; repro stays in /tmp | test-driven-development | P8, P10 |
+| S3 | One change at a time; after two failed attempts write a new hypothesis in the notes instead of a third variant | systematic-debugging (phase 3 and 4.5) | P8, P13 |
+| S4 | Evidence before submitting: run the repro and module test file fresh after the last edit, read the output, never submit on "should work" | verification-before-completion | P10 |
+
+P8 = Right file, wrong or incomplete logic (High). P10 = No regression test after the last edit (High).
+
 ## What was changed in itr-1
 
 | Change | File | Edit |
