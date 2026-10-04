@@ -41,6 +41,8 @@ def arguments():
                             help='Run these task IDs (space- or comma-separated).')
     task_group.add_argument('--all', action='store_true',
                             help='Run every task in the selected split.')
+    p.add_argument('--resume', action='store_true',
+                   help='Skip tasks with an existing result file in this submission log directory.')
     p.add_argument('--tasks', type=Path, help='Override the selected split task list.')
     p.add_argument('--snapshot', type=Path, help='Override the task snapshot path.')
     p.add_argument('--graph', type=Path, help='Override the task graph path.')
@@ -102,6 +104,16 @@ def arguments():
     unknown = [task_id for task_id in args.task_ids if task_id not in available]
     if unknown:
         p.error(f"Task(s) not in {args.split}: {', '.join(unknown)}")
+    if args.resume:
+        completed = [
+            task_id for task_id in args.task_ids
+            if (args.logs / task_id / 'results' / f'{task_id}.json').is_file()
+        ]
+        args.task_ids = [task_id for task_id in args.task_ids if task_id not in completed]
+        print(f'Resuming: skipping {len(completed)} completed task(s); '
+              f'{len(args.task_ids)} remaining.', flush=True)
+        if not args.task_ids:
+            p.error('No unfinished tasks remain for this submission and split.')
     if len(args.task_ids) > 1 and any(
         getattr(args, name) is not None for name in ('snapshot', 'graph', 'embeddings', 'wheels')
     ):
