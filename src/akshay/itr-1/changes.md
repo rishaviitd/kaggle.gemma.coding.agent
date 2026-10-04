@@ -1,7 +1,6 @@
 # itr-1 changes over the baseline
 
 Baseline: the itr-1 files as first committed on `main` (commit `c187b64`): the organizers' prompt with a 10-call / 1-minute budget.
-P and C IDs are the ones in `experiments/PROBLEMS_AND_SOLUTIONS.md` (source: `experiments/catalog/`). None of the changes has been run yet.
 
 ## Problems (P)
 
