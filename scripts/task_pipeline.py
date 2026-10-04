@@ -46,12 +46,13 @@ def arguments():
     p.add_argument('--graph', type=Path, help='Override the task graph path.')
     p.add_argument('--embeddings', type=Path, help='Override the task embeddings path.')
     p.add_argument('--wheels', type=Path, help='Override the task wheel-cache path.')
-    p.add_argument('--submission', type=Path, default=ROOT / 'src')
+    p.add_argument('--submission', type=Path,
+                   help='Agent directory under src/, for example src/rishav/itr-1.')
     # p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/'))
     p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'http://127.0.0.1:18001/v1'))
     p.add_argument('--model', default='gemma4')
     p.add_argument('--iteration', type=int, default=1,
-                   help='Positive experiment number; writes artifacts to logs/remote/iteration-N/<split>.')
+                   help='Positive experiment number used in Langfuse task names.')
     p.add_argument('--max-tool-calls', type=int, default=25)
     p.add_argument('--max-minutes', type=float, default=10)
     p.add_argument('--max-output-tokens', type=int, default=4096)
@@ -64,7 +65,17 @@ def arguments():
     args.tasks = args.tasks or split_dir / 'tasks.jsonl'
     if args.iteration < 1:
         p.error('--iteration must be a positive integer')
-    args.logs = ROOT / 'logs' / 'remote' / f'iteration-{args.iteration}' / args.split
+    if args.submission is None:
+        p.error('--submission is required; choose an iteration such as src/rishav/itr-1')
+    args.submission = args.submission.resolve()
+    src_root = (ROOT / 'src').resolve()
+    try:
+        submission_name = args.submission.relative_to(src_root)
+    except ValueError:
+        p.error('--submission must be a directory under src/')
+    if not (args.submission / 'agent.yaml').is_file():
+        p.error(f'Missing agent.yaml in --submission: {args.submission}')
+    args.logs = ROOT / 'logs' / 'remote' / submission_name / args.split
 
     manifest = split_dir / 'manifest.csv'
     if manifest.is_file():
