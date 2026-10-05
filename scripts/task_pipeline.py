@@ -105,10 +105,15 @@ def arguments():
     if unknown:
         p.error(f"Task(s) not in {args.split}: {', '.join(unknown)}")
     if args.resume:
-        completed = [
-            task_id for task_id in args.task_ids
-            if (args.logs / task_id / 'results' / f'{task_id}.json').is_file()
-        ]
+        def completed_result(task_id: str) -> bool:
+            path = args.logs / task_id / 'results' / f'{task_id}.json'
+            try:
+                result = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, json.JSONDecodeError):
+                return False
+            return isinstance(result.get('resolved'), bool) and not result.get('error')
+
+        completed = [task_id for task_id in args.task_ids if completed_result(task_id)]
         args.task_ids = [task_id for task_id in args.task_ids if task_id not in completed]
         print(f'Resuming: skipping {len(completed)} completed task(s); '
               f'{len(args.task_ids)} remaining.', flush=True)
