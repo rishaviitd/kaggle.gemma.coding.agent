@@ -162,7 +162,7 @@ def preflight_model(args, key):
 
 
 def prepare_agent(args, agent_dir):
-    shutil.copytree(args.submission, agent_dir, ignore=shutil.ignore_patterns('adapters', 'tools'))
+    shutil.copytree(args.submission, agent_dir, ignore=shutil.ignore_patterns('adapters', 'tools', 'tests'))
     for path in agent_dir.rglob('*.yaml'):
         lines = path.read_text().splitlines(keepends=True)
         path.write_text(''.join(line for line in lines if not line.startswith('adapter:')))
