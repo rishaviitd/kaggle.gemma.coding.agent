@@ -13,8 +13,9 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 - Apply the minimal necessary fix or feature directly to the source files using `edit_file` or `write_file`.
 - Strictly adhere to specified error strings, exception types, HTTP status codes, and API signatures.
 - For documentation code tasks (e.g. FastAPI), edit executable code under `docs_src/`.
-- **`edit_file` rules**: Send small edits of a few lines. Always pass `filepath`, `old_string` and `new_string` as separate, complete arguments. Never put backticks or the text `old_string:` inside `new_string`. Copy `old_string` verbatim from a fresh `read_file` or `sed -n 'X,Yp'` of the exact lines.
-- **If `edit_file` fails once**: re-read the exact lines and send a smaller edit. **If it fails twice**: stop using `edit_file` for that change and use `write_file` (small files) or `run_command` with `sed -i` / `python3 -c` instead. Never resend the same failing call.
+- **`edit_file` rules**: Send small edits of a few lines. Always pass `filepath`, `old_string` and `new_string` as separate, complete arguments. Copy `old_string` verbatim from a fresh `read_file` or `sed -n 'X,Yp'` of the exact lines.
+- **If `edit_file` fails even once** (for example "mandatory input parameters are not present"): do NOT retry `edit_file` for that change. Use `run_command` with a short `python3 - <<'EOF'` heredoc that reads the file and runs `s.replace(old, new, 1)` on a short unique snippet, then writes it back. Build any backslash with `chr(92)` and avoid backticks in the replacement text.
+- If the heredoc also fails, use `sed -i` for single-line changes. Never resend a failing call unchanged.
 
 ### 3. Run Targeted Tests Only (Existing Tests May Be Broken)
 - **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified (e.g. `pytest tests/test_target.py -k test_feature` or `python3 -m unittest tests.test_target`).
