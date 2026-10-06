@@ -51,6 +51,12 @@ notebooks/                Kaggle inference notebook
 presentation/             Project presentation source
 ```
 
+The trace viewer catalog is generated from directory structure, not a manually
+maintained task list. After adding traces anywhere below `logs/remote/` using
+the layout above, run `python3 scripts/build_trace_index.py`. The viewer's
+**Trace directory** control then lets you switch between every discovered
+directory (for example, `base`, `akshay/itr-1`, or `rishav/itr-1`).
+
 The split folders reference shared files in `data/assets/`, which are local downloads and are not committed. Run `scripts/plan_task_splits.py --materialize` after restoring the Kaggle data to rebuild those references.
 
 ## Data
