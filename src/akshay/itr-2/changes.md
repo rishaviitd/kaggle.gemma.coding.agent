@@ -56,3 +56,9 @@ Why a skill and not a change to `read_file`: submissions are YAML only. Tools co
 
 - No remote run. Compare with itr-1 on: read-to-edit gap, re-reads of the gold file, number of outline calls, resolve rate.
 - Risk: the model may ignore the skill; the prompt rule is the only push. Ranged `read_file` calls can still lose `start_line` to the argument-key bug (Part A: 20 of 343 ranged reads in base).
+
+## Run finding: empty-patch retry loop
+
+- `logs/remote/akshay/itr-2/train/fastapi_14306`: the agent used all 25 tool calls before its first edit; edit attempts then failed with `BudgetExceeded`. It submitted an empty diff **451 times** and timed out at 10 minutes.
+- `submit_patch` is allowed after the normal tool budget is exhausted and marks even an empty diff as submitted. The runner checks `patch_submitted` only after `runner.run_async()` returns, so repeated tool calls inside that stream are not stopped promptly.
+- Proposed harness fix: detect an empty submitted diff during event processing and terminate the stream once no edit budget remains. This should stop the retry loop while recording the task as failed; it does not fix the earlier exploration-budget exhaustion.

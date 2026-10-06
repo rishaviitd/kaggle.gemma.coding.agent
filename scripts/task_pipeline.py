@@ -55,9 +55,16 @@ def arguments():
     p.add_argument('--model', default='gemma4')
     p.add_argument('--iteration', type=int, default=1,
                    help='Positive experiment number used in Langfuse task names.')
-    p.add_argument('--max-tool-calls', type=int, default=25)
-    p.add_argument('--max-minutes', type=float, default=10)
-    p.add_argument('--max-output-tokens', type=int, default=4096)
+    p.add_argument('--max-tool-calls', type=int,
+                   help='Override max_tool_calls from the submission eval config.')
+    p.add_argument('--max-minutes', type=float,
+                   help='Override max_time_minutes from the submission eval config.')
+    p.add_argument('--timeout-seconds', type=int,
+                   help='Override timeout_seconds from the submission eval config.')
+    p.add_argument('--max-turns', type=int,
+                   help='Override max_turns from the submission eval config.')
+    p.add_argument('--max-output-tokens', type=int,
+                   help='Override max_output_tokens from the submission sampling config.')
     p.add_argument('--skip-langfuse', action='store_true',
                    help='Do not upload the completed local trace even when Langfuse is configured.')
     p.add_argument('--langfuse-session-id',
@@ -77,6 +84,31 @@ def arguments():
         p.error('--submission must be a directory under src/')
     if not (args.submission / 'agent.yaml').is_file():
         p.error(f'Missing agent.yaml in --submission: {args.submission}')
+    eval_config_path = args.submission / 'eval_config.yaml'
+    eval_config = yaml.safe_load(eval_config_path.read_text()) if eval_config_path.is_file() else {}
+    if eval_config is None:
+        eval_config = {}
+    if not isinstance(eval_config, dict):
+        p.error(f'Invalid evaluation config: {eval_config_path}')
+    evaluation = eval_config.get('evaluation', {})
+    if not isinstance(evaluation, dict):
+        p.error(f'evaluation must be a mapping in {eval_config_path}')
+    args.max_tool_calls = (
+        args.max_tool_calls if args.max_tool_calls is not None
+        else evaluation.get('max_tool_calls', 25)
+    )
+    args.max_minutes = (
+        args.max_minutes if args.max_minutes is not None
+        else evaluation.get('max_time_minutes', 5)
+    )
+    args.timeout_seconds = (
+        args.timeout_seconds if args.timeout_seconds is not None
+        else evaluation.get('timeout_seconds', 300)
+    )
+    args.max_turns = (
+        args.max_turns if args.max_turns is not None
+        else evaluation.get('max_turns')
+    )
     args.logs = ROOT / 'logs' / 'remote' / submission_name / args.split
 
     manifest = split_dir / 'manifest.csv'
@@ -167,9 +199,35 @@ def prepare_agent(args, agent_dir):
         lines = path.read_text().splitlines(keepends=True)
         path.write_text(''.join(line for line in lines if not line.startswith('adapter:')))
     sampling_path = agent_dir / 'configs/sampling.yaml'
-    sampling = yaml.safe_load(sampling_path.read_text())
-    sampling['max_output_tokens'] = args.max_output_tokens
+    sampling = yaml.safe_load(sampling_path.read_text()) or {}
+    if args.max_output_tokens is not None:
+        sampling['max_output_tokens'] = args.max_output_tokens
+    else:
+        sampling.setdefault('max_output_tokens', 4096)
     sampling_path.write_text(yaml.safe_dump(sampling))
+
+
+def print_run_config(args, agent_dir):
+    sampling_path = agent_dir / 'configs/sampling.yaml'
+    sampling = yaml.safe_load(sampling_path.read_text()) or {}
+    thinking = sampling.get('thinking_config') or {}
+    default = '<framework default>'
+    print(
+        'Sampling config: '
+        f"temperature={sampling.get('temperature', default)}, "
+        f"top_p={sampling.get('top_p', default)}, "
+        f"max_output_tokens={sampling.get('max_output_tokens', default)}, "
+        f"thinking_budget={thinking.get('thinking_budget', default)}, "
+        f"include_thoughts={thinking.get('include_thoughts', default)}",
+        flush=True,
+    )
+    print(
+        f'Effective task limits: max_tool_calls={args.max_tool_calls}, '
+        f'max_time_minutes={args.max_minutes}, '
+        f'timeout_seconds={args.timeout_seconds}, '
+        f'max_turns={args.max_turns if args.max_turns is not None else default}',
+        flush=True,
+    )
 
 
 async def run_one(args, working, agent_dir, key, task, index, total):
@@ -203,7 +261,8 @@ async def run_one(args, working, agent_dir, key, task, index, total):
                                          served_model=args.model, num_retries=2),
         task_ids=[task.instance_id], sandbox='docker', image='swebench-sandbox:latest',
         max_tool_calls=args.max_tool_calls, max_time_minutes=args.max_minutes,
-        timeout_seconds=300, concurrency=1, display_mode='auto',
+        timeout_seconds=args.timeout_seconds, max_turns=args.max_turns,
+        concurrency=1, display_mode='auto',
         events_compaction_config=EventsCompactionConfig(
             compaction_interval=15, overlap_size=2, token_threshold=14336,
             event_retention_size=5),
@@ -260,10 +319,11 @@ async def run(args, working):
     sandbox_setup_dir = ROOT / 'data' / 'sandbox'
     if (sandbox_setup_dir / 'setup.py').is_file():
         os.environ.setdefault('KAGGLE_SANDBOX_DIR', str(sandbox_setup_dir))
-    preflight_model(args, key)
     litellm.drop_params = True
     agent_dir = working / 'agent'
     prepare_agent(args, agent_dir)
+    print_run_config(args, agent_dir)
+    preflight_model(args, key)
     args.logs.mkdir(parents=True, exist_ok=True)
     for index, task_id in enumerate(args.task_ids, start=1):
         task_logs = args.logs / task_id

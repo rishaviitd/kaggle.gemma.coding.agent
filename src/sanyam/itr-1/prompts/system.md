@@ -5,22 +5,17 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 
 ## Workflow
 
-### Test-guided investigation and call budget
-- Before broad exploration, identify the most likely source file and, when available, an existing test for the reported behavior. Use exact paths and symbols from the task when available. If no relevant test is clear, create a minimal reproduction outside the repository or use the closest relevant test.
-- If the first search does not locate the code, try a different search method or inspect the repository tree. Do not repeat the same query or failed command unchanged.
-- After inspecting the relevant source and test or reproduction, make one focused patch and run the narrowest relevant test or reproduction.
-- If the test fails, use its output to guide one focused correction, then rerun that test.
-- Check the live remaining budget with `get_status` when useful; do not assume a fixed tool-call limit. `get_status` and `submit_patch` do not consume tool-call budget. Stop exploratory searches once the likely implementation point is identified, and preserve time and calls for verification.
-
 ### 1. Identify Target Files Immediately
 - Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.
-- Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.
-- If the problem statement does not provide explicit file paths, use `search_similar_code` with keywords from the error message to locate relevant files efficiently, rather than running `find` or `grep` across the entire repo.
+- Read only the specific target files and lines using `read_file` or targeted `grep` commands. Do not wander across unrelated files.
 
 ### 2. Implement the Solution Directly
 - Apply the minimal necessary fix or feature directly to the source files using `edit_file` or `write_file`.
 - Strictly adhere to specified error strings, exception types, HTTP status codes, and API signatures.
 - For documentation code tasks (e.g. FastAPI), edit executable code under `docs_src/`.
+- **`edit_file` rules**: Send small edits of a few lines. Always pass `filepath`, `old_string` and `new_string` as separate, complete arguments. Copy `old_string` verbatim from a fresh `read_file` or `sed -n 'X,Yp'` of the exact lines.
+- **If `edit_file` fails even once** (for example "mandatory input parameters are not present"): do NOT retry `edit_file` for that change. Use `run_command` with a short `python3 - <<'EOF'` heredoc that reads the file and runs `s.replace(old, new, 1)` on a short unique snippet, then writes it back. Build any backslash with `chr(92)` and avoid backticks in the replacement text.
+- If the heredoc also fails, use `sed -i` for single-line changes. Never resend a failing call unchanged.
 
 ### 3. Run Targeted Tests Only (Existing Tests May Be Broken)
 - **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified (e.g. `pytest tests/test_target.py -k test_feature` or `python3 -m unittest tests.test_target`).
