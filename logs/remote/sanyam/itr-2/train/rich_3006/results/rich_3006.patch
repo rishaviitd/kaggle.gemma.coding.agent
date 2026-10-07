@@ -1,0 +1,79 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..4dc81d9b
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,60 @@
++
++import inspect
++from rich.repr import auto
++
++class AlwaysTrueEq:
++    def __eq__(self, other):
++        return True
++
++@auto
++class Foo:
++    def __init__(self, a=AlwaysTrueEq()):
++        self.a = a
++
++foo = Foo()
++# The current implementation of auto_rich_repr uses ==
++# If it uses ==, then param.default == param.empty will be True
++# because AlwaysTrueEq() == inspect.Parameter.empty is True.
++# Then it will yield getattr(self, param.name), which is the value of a.
++# But it SHOULD yield (param.name, getattr(self, param.name), param.default)
++# because it HAS a default value.
++
++# Let's see what __rich_repr__ yields.
++rich_repr_gen = foo.__rich_repr__()
++results = list(rich_repr_gen)
++
++print(f"Results: {results}")
++
++# If the bug exists, it will yield [AlwaysTrueEq()]
++# If fixed, it should yield [('a', AlwaysTrueEq(), AlwaysTrueEq())]
++# Wait, let's check what it should be.
++# In auto_rich_repr:
++# if param.default == param.empty:
++#     yield getattr(self, param.name)
++# else:
++#     yield param.name, getattr(self, param.name), param.default
++
++# If the bug exists, it thinks there is no default, so it yields just the value.
++# If fixed, it sees there is a default, so it yields (name, value, default).
++
++if len(results) == 1 and not isinstance(results[0], tuple):
++    print("BUG DETECTED: Treated default value as empty")
++elif len(results) == 1 and isinstance(results[0], tuple):
++    print("FIXED: Correctly identified default value")
++else:
++    print(f"Unexpected results: {results}")
++
++# Also check the __repr__
++print(f"Repr: {repr(foo)}")
++# If bug: Foo(AlwaysTrueEq())
++# If fixed: Foo(a=AlwaysTrueEq())
++# Wait, if it's (name, value, default) and value == default, it's skipped in auto_repr:
++# if default and default[0] == value:
++#     continue
++# So if fixed, it should be Foo() because a=AlwaysTrueEq() and default is AlwaysTrueEq(), and they are equal.
++# Let's check auto_repr:
++# if default and default[0] == value:
++#     continue
++# Yes, it's skipped.
++# So if bug: Foo(AlwaysTrueEq())
++# If fixed: Foo()
+diff --git a/rich/repr.py b/rich/repr.py
+index 9dd65cde..95331006 100644
+--- a/rich/repr.py
++++ b/rich/repr.py
+@@ -76,7 +76,7 @@ def auto(
+                         param.POSITIONAL_OR_KEYWORD,
+                         param.KEYWORD_ONLY,
+                     ):
+-                        if param.default == param.empty:
++                        if param.default is param.empty:
+                             yield getattr(self, param.name)
+                         else:
+                             yield param.name, getattr(self, param.name), param.default

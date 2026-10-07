@@ -1,0 +1,104 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..7c454eb3
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,77 @@
++
++import requests
++from requests.models import Response
++from requests.structures import CaseInsensitiveDict
++
++def test_redirect_history_self_reference():
++    # We need to mock the redirect behavior.
++    # Since we can't easily mock the network, we can use a mock adapter or just 
++    # call resolve_redirects if we can set up the environment.
++    
++    class MockResponse(Response):
++        def __init__(self, url, status_code=200, history=None):
++            super().__init__()
++            self.url = url
++            self.status_code = status_code
++            self.history = history or []
++            self.raw = None # avoid issues with content access
++        
++        def close(self):
++            pass
++
++    from requests.sessions import Session
++    from requests.models import PreparedRequest
++    
++    s = Session()
++    req = PreparedRequest()
++    req.url = "http://initial.com"
++    req.headers = CaseInsensitiveDict()
++    req._cookies = requests.cookies.RequestsCookieJar()
++    
++    # We need to simulate:
++    # 1. s.send(req) -> resp1 (302)
++    # 2. resolve_redirects starts:
++    #    a. s.send(req1) -> resp2 (302)
++    #    b. s.send(req2) -> resp3 (200)
++    
++    resp1 = MockResponse("http://initial.com", status_code=302)
++    resp2 = MockResponse("http://redirect1.com", status_code=302)
++    resp3 = MockResponse("http://redirect2.com", status_code=200)
++    
++    # Mock get_redirect_target to return the next URL
++    s.get_redirect_target = lambda resp: {
++        "http://initial.com": "http://redirect1.com",
++        "http://redirect1.com": "http://redirect2.com",
++        "http://redirect2.com": None
++    }.get(resp.url)
++    
++    # Mock send to return the next response
++    responses = [resp2, resp3]
++    def mock_send(req, **kwargs):
++        return responses.pop(0)
++    s.send = mock_send
++    
++    # Call resolve_redirects
++    gen = s.resolve_redirects(resp1, req)
++    results = list(gen)
++    
++    # In the original code:
++    # 1st loop: resp=resp1, hist=[resp1], resp1.history = []
++    # 2nd loop: resp=resp2, hist=[resp1, resp2], resp2.history = [resp2]  <-- SELF REFERENCE
++    
++    print(f"resp1 history: {resp1.history}")
++    print(f"resp2 history: {resp2.history}")
++    
++    assert resp1 not in resp1.history, "resp1 should not be in its own history"
++    assert resp2 not in resp2.history, "resp2 should not be in its own history"
++    print("Success!")
++
++if __name__ == "__main__":
++    try:
++        test_redirect_history_self_reference()
++    except AssertionError as e:
++        print(f"Failure: {e}")
++    except Exception as e:
++        print(f"An error occurred: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+index 578cc44d..ca542978 100644
+--- a/src/requests/sessions.py
++++ b/src/requests/sessions.py
+@@ -181,14 +181,14 @@ class SessionRedirectMixin:
+             # Update history and keep track of redirects.
+             # resp.history must ignore the original request in this loop
+             hist.append(resp)
+-            resp.history = hist[1:]
+ 
+             try:
+                 resp.content  # Consume socket so it can be released
+             except (ChunkedEncodingError, ContentDecodingError, RuntimeError):
+                 resp.raw.read(decode_content=False)
+ 
+-            if len(resp.history) >= self.max_redirects:
++            if len(hist) > self.max_redirects:
++                resp.history = hist[:-1]
+                 raise TooManyRedirects(
+                     f"Exceeded {self.max_redirects} redirects.", response=resp
+                 )

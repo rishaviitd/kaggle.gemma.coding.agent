@@ -1,0 +1,145 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..b989766a
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,70 @@
++
++import requests
++from requests.models import Request
++from requests.sessions import Session
++
++class ProxyRead:
++    def __init__(self, data):
++        self._data = data
++    def __getattr__(self, name):
++        attr = getattr(self._data, name)
++        if callable(attr):
++            def wrapper(*args, **kwargs):
++                return attr(*args, **kwargs)
++            return wrapper
++        return attr
++
++def test_proxy_read_prepare_body():
++    # Test that a proxy object with a read method is treated as a read-like object
++    # and does not get encoded as application/x-www-form-urlencoded
++    
++    # Create a mock read-like object
++    class MockRead:
++        def read(self, size=-1):
++            return b"test data"
++    
++    read_obj = MockRead()
++    proxy_read = ProxyRead(read_obj)
++    
++    # We want to see if prepare_body handles proxy_read correctly.
++    # In prepare_body, if it's recognized as read-like, content_type remains None
++    # (or is set by something else), but it should NOT be set to application/x-www-form-urlencoded
++    # if it's recognized as read-like.
++    
++    # Actually, the logic is:
++    # if isinstance(data, basestring) or isinstance(data, _SupportsRead) or hasattr(data, "read"):
++    #     content_type = None
++    # else:
++    #     content_type = "application/x-www-form-urlencoded"
++    
++    # Let's use a Request object and call prepare_body
++    req = Request('POST', 'http://example.com', data=proxy_read)
++    session = Session()
++    # prepare_body is called during prepare_request
++    prepared = session.prepare_request(req)
++    
++    # If it was recognized as read-like, content_type should be None (unless it was set elsewhere)
++    # If it was NOT recognized, it would be 'application/x-www-form-urlencoded'
++    assert prepared.headers.get('Content-Type') != 'application/x-www-form-urlencoded', \
++        f"ProxyRead object was incorrectly identified as non-read-like. Content-Type: {prepared.headers.get('Content-Type')}"
++
++def test_proxy_read_encode_params():
++    # Test the other occurrence in _encode_params
++    # RequestEncodingMixin._encode_params is called when data is not a stream
++    # But wait, the check is in prepare_body, which calls _encode_params.
++    
++    # Let's test the logic in _encode_params indirectly via prepare_body
++    # The first occurrence was:
++    # if isinstance(data, basestring) or isinstance(data, _SupportsRead) or hasattr(data, "read"):
++    #     # ...
++    
++    # Let's just use the same test as above, as it covers the logic.
++    pass
++
++if __name__ == "__main__":
++    try:
++        test_proxy_read_prepare_body()
++        print("Test passed!")
++    except Exception as e:
++        print(f"Test failed: {e}")
++        exit(1)
+diff --git a/_test_protocol.py b/_test_protocol.py
+new file mode 100644
+index 00000000..e13ea06e
+--- /dev/null
++++ b/_test_protocol.py
+@@ -0,0 +1,18 @@
++
++from typing import Protocol, runtime_checkable
++
++@runtime_checkable
++class SupportsRead(Protocol):
++    def read(self, length: int = ...):
++        ...
++
++class MockRead:
++    def read(self, length: int = 10):
++        return b"data"
++
++class MockNoRead:
++    def write(self, data):
++        pass
++
++print(f"MockRead is SupportsRead: {isinstance(MockRead(), SupportsRead)}")
++print(f"MockNoRead is SupportsRead: {isinstance(MockNoRead(), SupportsRead)}")
+diff --git a/_test_proxy.py b/_test_proxy.py
+new file mode 100644
+index 00000000..1d46dbf2
+--- /dev/null
++++ b/_test_proxy.py
+@@ -0,0 +1,17 @@
++
++from typing import Protocol, runtime_checkable
++
++@runtime_checkable
++class SupportsRead(Protocol):
++    def read(self, length: int = ...):
++        ...
++
++class Proxy:
++    def __getattr__(self, name):
++        if name == "read":
++            return lambda length=10: b"data"
++        raise AttributeError(name)
++
++p = Proxy()
++print(f"hasattr(p, 'read'): {hasattr(p, 'read')}")
++print(f"isinstance(p, SupportsRead): {isinstance(p, SupportsRead)}")
+diff --git a/src/requests/models.py b/src/requests/models.py
+index ebeba1e3..e798d91d 100644
+--- a/src/requests/models.py
++++ b/src/requests/models.py
+@@ -161,7 +161,7 @@ class RequestEncodingMixin:
+ 
+         if isinstance(data, (str, bytes)):
+             return data
+-        elif isinstance(data, _SupportsRead):
++        elif isinstance(data, _SupportsRead) or hasattr(data, "read"):
+             return data
+         elif hasattr(data, "__iter__"):
+             result: list[tuple[bytes, bytes]] = []
+@@ -641,7 +641,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+             else:
+                 if raw_data:
+                     body = self._encode_params(raw_data)
+-                    if isinstance(data, basestring) or isinstance(data, _SupportsRead):
++                    if isinstance(data, basestring) or isinstance(data, _SupportsRead) or hasattr(data, "read"):
+                         content_type = None
+                     else:
+                         content_type = "application/x-www-form-urlencoded"

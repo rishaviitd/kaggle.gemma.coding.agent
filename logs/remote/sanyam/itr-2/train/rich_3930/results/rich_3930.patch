@@ -1,0 +1,182 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..fc5bfc7c
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,43 @@
++from rich.cells import cell_len, chop_cells, set_cell_size
++
++def test_graphemes():
++    # Multi-codepoint emoji (Family: Woman, Woman, Girl, Boy)
++    # Should be 1 grapheme, width 2
++    emoji_family = "👩‍👩‍👧‍👦"
++    print(f"Emoji Family: {emoji_family}")
++    print(f"cell_len: {cell_len(emoji_family)} (expected 2)")
++    assert cell_len(emoji_family) == 2
++
++    # Base character + combining mark
++    # Should be 1 grapheme, width 1
++    combining = "a\u0300"
++    print(f"Combining: {combining}")
++    print(f"cell_len: {cell_len(combining)} (expected 1)")
++    assert cell_len(combining) == 1
++
++    # Multiple emojis
++    # Should be 2 graphemes, width 4
++    emojis = "👩‍👩‍👧‍👦👩"
++    print(f"Emojis: {emojis}")
++    print(f"cell_len: {cell_len(emojis)} (expected 4)")
++    assert cell_len(emojis) == 4
++
++    # Chop cells
++    # "👩‍👩‍👧‍👦" is width 2. chop_cells(..., 1) should probably return [""] or something?
++    # Actually, if width is 1, and the only grapheme is width 2, it should be chopped.
++    # But how do you chop a single grapheme?
++    # Usually, you can't. So it might return the grapheme anyway or an empty string.
++    # Let's see what happens.
++    print(f"chop_cells(emoji_family, 1): {chop_cells(emoji_family, 1)}")
++
++    # set_cell_size
++    print(f"set_cell_size(emoji_family, 1): {set_cell_size(emoji_family, 1)}")
++    print(f"set_cell_size(emoji_family, 2): {set_cell_size(emoji_family, 2)}")
++
++if __name__ == '__main__':
++    try:
++        test_graphemes()
++        print("All tests passed!")
++    except AssertionError as e:
++        print(f"Test failed!")
++        raise e
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..2c619ede 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -1,7 +1,8 @@
+ from __future__ import annotations
+ 
+ from functools import lru_cache
+-from typing import Callable
++from typing import Callable, Iterable
++import unicodedata
+ 
+ from ._cell_widths import CELL_WIDTHS
+ 
+@@ -30,6 +31,36 @@ _SINGLE_CELLS = frozenset(
+ _is_single_cell_widths: Callable[[str], bool] = _SINGLE_CELLS.issuperset
+ 
+ 
++def graphemes(text: str) -> Iterable[str]:
++    """Split text into graphemes."""
++    grapheme = []
++    for i, char in enumerate(text):
++        is_combining = (
++            unicodedata.combining(char)
++            or unicodedata.category(char).startswith("M")
++        )
++        is_zwj = char == "\u200d"
++        prev_was_zwj = i > 0 and text[i - 1] == "\u200d"
++
++        if is_combining or is_zwj or prev_was_zwj:
++            grapheme.append(char)
++        else:
++            if grapheme:
++                yield "".join(grapheme)
++            grapheme = [char]
++    if grapheme:
++        yield "".join(grapheme)
++
++
++def get_grapheme_cell_size(g: str) -> int:
++    """Get the cell size of a grapheme."""
++    for char in g:
++        width = get_character_cell_size(char)
++        if width > 0:
++            return width
++    return 0
++
++
+ @lru_cache(4096)
+ def cached_cell_len(text: str) -> int:
+     """Get the number of cells required to display text.
+@@ -45,7 +76,7 @@ def cached_cell_len(text: str) -> int:
+     """
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return sum(map(get_grapheme_cell_size, graphemes(text)))
+ 
+ 
+ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> int:
+@@ -61,7 +92,7 @@ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> in
+         return _cell_len(text)
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return sum(map(get_grapheme_cell_size, graphemes(text)))
+ 
+ 
+ @lru_cache(maxsize=4096)
+@@ -104,24 +135,26 @@ def set_cell_size(text: str, total: int) -> str:
+ 
+     if total <= 0:
+         return ""
+-    cell_size = cell_len(text)
++
++    gs = list(graphemes(text))
++    cell_size = sum(map(get_grapheme_cell_size, gs))
+     if cell_size == total:
+         return text
+     if cell_size < total:
+         return text + " " * (total - cell_size)
+ 
+     start = 0
+-    end = len(text)
++    end = len(gs)
+ 
+     # Binary search until we find the right size
+     while True:
+         pos = (start + end) // 2
+-        before = text[: pos + 1]
+-        before_len = cell_len(before)
+-        if before_len == total + 1 and cell_len(before[-1]) == 2:
+-            return before[:-1] + " "
++        before_gs = gs[: pos + 1]
++        before_len = sum(map(get_grapheme_cell_size, before_gs))
++        if before_len == total + 1 and get_grapheme_cell_size(gs[pos]) == 2:
++            return "".join(before_gs[:-1]) + " "
+         if before_len == total:
+-            return before
++            return "".join(before_gs)
+         if before_len > total:
+             end = pos
+         else:
+@@ -142,7 +175,7 @@ def chop_cells(
+         A list of strings such that each string in the list has cell width
+         less than or equal to the available width.
+     """
+-    _get_character_cell_size = get_character_cell_size
++    _get_grapheme_cell_size = get_grapheme_cell_size
+     lines: list[list[str]] = [[]]
+ 
+     append_new_line = lines.append
+@@ -150,16 +183,16 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
++    for grapheme in graphemes(text):
++        cell_width = _get_grapheme_cell_size(grapheme)
+         char_doesnt_fit = total_width + cell_width > width
+ 
+         if char_doesnt_fit:
+-            append_new_line([character])
++            append_new_line([grapheme])
+             append_to_last_line = lines[-1].append
+             total_width = cell_width
+         else:
+-            append_to_last_line(character)
++            append_to_last_line(grapheme)
+             total_width += cell_width
+ 
+     return ["".join(line) for line in lines]

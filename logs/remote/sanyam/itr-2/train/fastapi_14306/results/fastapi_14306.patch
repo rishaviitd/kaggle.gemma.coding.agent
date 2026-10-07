@@ -1,0 +1,120 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..7483a2b1 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -163,22 +163,44 @@ class ValidationException(Exception):
+ 
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, endpoint_metadata: Optional[Dict[str, Any]] = None) -> None:
+         super().__init__(errors)
+         self.body = body
++        self.endpoint_metadata = endpoint_metadata
++
++    def __str__(self) -> str:
++        message = super().__str__()
++        if self.endpoint_metadata:
++            meta = self.endpoint_metadata
++            message += f" | Endpoint: {meta['method']} {meta['route']} ({meta['function']} at {meta['filepath']}:{meta['lineno']})"
++        return message
+ 
+ 
+ class WebSocketRequestValidationError(ValidationException):
+-    pass
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, endpoint_metadata: Optional[Dict[str, Any]] = None) -> None:
++        super().__init__(errors)
++        self.body = body
++        self.endpoint_metadata = endpoint_metadata
++
++    def __str__(self) -> str:
++        message = super().__str__()
++        if self.endpoint_metadata:
++            meta = self.endpoint_metadata
++            message += f" | Endpoint: {meta['method']} {meta['route']} ({meta['function']} at {meta['filepath']}:{meta['lineno']})"
++        return message
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, endpoint_metadata: Optional[Dict[str, Any]] = None) -> None:
+         super().__init__(errors)
+         self.body = body
++        self.endpoint_metadata = endpoint_metadata
+ 
+     def __str__(self) -> str:
+         message = f"{len(self._errors)} validation errors:\n"
+         for err in self._errors:
+             message += f"  {err}\n"
++        if self.endpoint_metadata:
++            meta = self.endpoint_metadata
++            message += f" | Endpoint: {meta['method']} {meta['route']} ({meta['function']} at {meta['filepath']}:{meta['lineno']})"
+         return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..5a795ee6 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -215,6 +215,7 @@ def _merge_lifespan_context(
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
++    endpoint_metadata: Optional[Dict[str, Any]] = None,
+     response_content: Any,
+     include: Optional[IncEx] = None,
+     exclude: Optional[IncEx] = None,
+@@ -246,7 +247,7 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors), body=response_content, endpoint_metadata=endpoint_metadata
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -312,6 +313,30 @@ def get_request_handler(
+         actual_response_class = response_class
+ 
+     async def app(request: Request) -> Response:
++
++    # Extract endpoint metadata for better tracebacks
++    endpoint_metadata = getattr(dependant, "endpoint_metadata", None)
++    if endpoint_metadata is None:
++        try:
++            call = dependant.call
++            while hasattr(call, "__wrapped__"):
++                call = call.__wrapped__
++            try:
++                source_file = inspect.getsourcefile(call)
++                lines, start_line = inspect.getsourcelines(call)
++            except (TypeError, OSError):
++                source_file = "unknown"
++                start_line = 0
++            endpoint_metadata = {
++                "method": request.method,
++                "route": request.url.path,
++                "function": call.__name__,
++                "filepath": source_file,
++                "lineno": start_line,
++            }
++            dependant.endpoint_metadata = endpoint_metadata
++        except Exception:
++            endpoint_metadata = None
+         response: Union[Response, None] = None
+         file_stack = request.scope.get("fastapi_middleware_astack")
+         assert isinstance(file_stack, AsyncExitStack), (
+@@ -355,6 +380,7 @@ def get_request_handler(
+                     }
+                 ],
+                 body=e.doc,
++                endpoint_metadata=endpoint_metadata,
+             )
+             raise validation_error from e
+         except HTTPException:
+@@ -408,6 +434,7 @@ def get_request_handler(
+                     field=response_field,
+                     response_content=raw_response,
+                     include=response_model_include,
++                    endpoint_metadata=endpoint_metadata,
+                     exclude=response_model_exclude,
+                     by_alias=response_model_by_alias,
+                     exclude_unset=response_model_exclude_unset,
