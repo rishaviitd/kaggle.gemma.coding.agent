@@ -1,0 +1,209 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..4849e143
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,57 @@
++from rich.cells import cell_len, set_cell_size, chop_cells
++
++def test_cell_len():
++    # Family emoji: should be 2 cells
++    emoji = "\U0001f469\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
++    assert cell_len(emoji) == 2, f"Expected cell_len('{emoji}') to be 2, got {cell_len(emoji)}"
++    
++    # Combining character: a + accent should be 1 cell
++    accented = "a\u0301"
++    assert cell_len(accented) == 1, f"Expected cell_len('{accented}') to be 1, got {cell_len(accented)}"
++    
++    # Mixed: a + accent + b should be 2 cells
++    mixed = "a\u0301b"
++    assert cell_len(mixed) == 2, f"Expected cell_len('{mixed}') to be 2, got {cell_len(mixed)}"
++    
++    # Empty string
++    assert cell_len("") == 0
++
++def test_set_cell_size():
++    # Family emoji: should fit in 2 cells
++    emoji = "\U0001f469\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
++    assert set_cell_size(emoji, 2) == emoji
++    assert set_cell_size(emoji, 1) == " "
++    assert set_cell_size(emoji, 3) == emoji + " "
++    
++    # Combining character: a + accent
++    accented = "a\u0301"
++    assert set_cell_size(accented, 1) == accented
++    assert set_cell_size(accented, 0) == ""
++    assert set_cell_size(accented, 2) == accented + " "
++
++def test_chop_cells():
++    # Family emoji: width 2. If we have width 2, it should be one line.
++    emoji = "\U0001f469\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
++    assert chop_cells(emoji, 2) == [emoji]
++    assert chop_cells(emoji, 1) == [" ", " "] # Wait, if width is 1, the emoji (width 2) doesn't fit.
++    # Actually, chop_cells should probably not split graphemes.
++    # In my implementation:
++    # g = emoji (width 2). total_width (0) + 2 > 1 is True.
++    # append_new_line([emoji]), total_width = 2.
++    # Result: [emoji].
++    # Wait, if width is 1, the emoji (width 2) is still put in a line.
++    # Let's see what current rich does.
++    
++    # For a single character that is width 2, and width = 1, rich's original chop_cells would:
++    # cell_width = 2. 0 + 2 > 1 is True.
++    # append_new_line([character]), total_width = 2.
++    # Result: [character].
++    # So it does just put it on its own line even if it exceeds the width.
++    
++    assert chop_cells(emoji, 1) == [emoji]
++
++if __name__ == "__main__":
++    test_cell_len()
++    test_set_cell_size()
++    test_chop_cells()
++    print("All tests passed!")
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..d6e286a1 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -1,7 +1,8 @@
+ from __future__ import annotations
+ 
+ from functools import lru_cache
+-from typing import Callable
++from typing import Callable, Iterator
++import unicodedata
+ 
+ from ._cell_widths import CELL_WIDTHS
+ 
+@@ -25,6 +26,40 @@ _SINGLE_CELLS = frozenset(
+     ]
+ )
+ 
++
++def split_graphemes(text: str) -> Iterator[str]:
++    """Split text into graphemes.
++
++    Args:
++        text (str): Text to split.
++
++    Returns:
++        Iterator[str]: An iterator of graphemes.
++    """
++    if not text:
++        return
++
++    grapheme = ""
++    for char in text:
++        if not grapheme:
++            grapheme += char
++            continue
++
++        if unicodedata.category(char).startswith("M") or char == "\u200d":
++            grapheme += char
++            continue
++
++        if grapheme[-1] == "\u200d":
++            grapheme += char
++            continue
++
++        yield grapheme
++        grapheme = char
++
++    if grapheme:
++        yield grapheme
++
++
+ # When called with a string this will return True if all
+ # characters are single-cell, otherwise False
+ _is_single_cell_widths: Callable[[str], bool] = _SINGLE_CELLS.issuperset
+@@ -45,7 +80,7 @@ def cached_cell_len(text: str) -> int:
+     """
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return sum(get_character_cell_size(grapheme[0]) for grapheme in split_graphemes(text))
+ 
+ 
+ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> int:
+@@ -61,7 +96,7 @@ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> in
+         return _cell_len(text)
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return sum(get_character_cell_size(grapheme[0]) for grapheme in split_graphemes(text))
+ 
+ 
+ @lru_cache(maxsize=4096)
+@@ -104,28 +139,23 @@ def set_cell_size(text: str, total: int) -> str:
+ 
+     if total <= 0:
+         return ""
+-    cell_size = cell_len(text)
+-    if cell_size == total:
+-        return text
+-    if cell_size < total:
+-        return text + " " * (total - cell_size)
+ 
+-    start = 0
+-    end = len(text)
++    graphemes = list(split_graphemes(text))
++    current_width = 0
++    result_graphemes = []
+ 
+-    # Binary search until we find the right size
+-    while True:
+-        pos = (start + end) // 2
+-        before = text[: pos + 1]
+-        before_len = cell_len(before)
+-        if before_len == total + 1 and cell_len(before[-1]) == 2:
+-            return before[:-1] + " "
+-        if before_len == total:
+-            return before
+-        if before_len > total:
+-            end = pos
+-        else:
+-            start = pos
++    for g in graphemes:
++        g_width = get_character_cell_size(g[0])
++        if current_width + g_width > total:
++            break
++        result_graphemes.append(g)
++        current_width += g_width
++
++    result_text = "".join(result_graphemes)
++    if current_width < total:
++        result_text += " " * (total - current_width)
++
++    return result_text
+ 
+ 
+ def chop_cells(
+@@ -142,7 +172,6 @@ def chop_cells(
+         A list of strings such that each string in the list has cell width
+         less than or equal to the available width.
+     """
+-    _get_character_cell_size = get_character_cell_size
+     lines: list[list[str]] = [[]]
+ 
+     append_new_line = lines.append
+@@ -150,16 +179,16 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
++    for grapheme in split_graphemes(text):
++        cell_width = get_character_cell_size(grapheme[0])
+         char_doesnt_fit = total_width + cell_width > width
+ 
+         if char_doesnt_fit:
+-            append_new_line([character])
++            append_new_line([grapheme])
+             append_to_last_line = lines[-1].append
+             total_width = cell_width
+         else:
+-            append_to_last_line(character)
++            append_to_last_line(grapheme)
+             total_width += cell_width
+ 
+     return ["".join(line) for line in lines]

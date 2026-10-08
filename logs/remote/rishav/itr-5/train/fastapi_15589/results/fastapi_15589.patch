@@ -1,0 +1,119 @@
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 7c6558c69..7082f6780 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -814,13 +814,14 @@ def request_params_to_args(
+         alias = None
+         if isinstance(received_params, Headers):
+             # Handle fields extracted from a Pydantic Model for a header, each field
++
+             # doesn't have a FieldInfo of type Header with the default convert_underscores=True
+             convert_underscores = getattr(
+                 field.field_info, "convert_underscores", default_convert_underscores
+             )
+             if convert_underscores:
+                 alias = get_validation_alias(field)
+-                if alias == field.name:
++                if alias:
+                     alias = alias.replace("_", "-")
+         value = _get_multidict_value(field, received_params, alias=alias)
+         if value is not None:
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 000000000..917b3ba12
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,36 @@
++from fastapi import FastAPI, Header
++from fastapi.testclient import TestClient
++
++app = FastAPI()
++
++@app.get("/")
++async def read_header(my_header: str = Header(None)):
++    return {"my_header": my_header}
++
++@app.get("/disabled")
++async def read_header_disabled(my_header: str = Header(None, convert_underscores=False)):
++    return {"my_header": my_header}
++
++client = TestClient(app)
++
++def test_underscore_header():
++    # Default convert_underscores=True
++    # Should NOT accept my_header, only my-header
++    response = client.get("/", headers={"my_header": "value1"})
++    print(f"Request with my_header (default): {response.json()}")
++    
++    response = client.get("/", headers={"my-header": "value2"})
++    print(f"Request with my-header (default): {response.json()}")
++
++def test_underscore_header_disabled():
++    # convert_underscores=False
++    # Should accept my_header
++    response = client.get("/disabled", headers={"my_header": "value3"})
++    print(f"Request with my_header (disabled): {response.json()}")
++    
++    response = client.get("/disabled", headers={"my-header": "value4"})
++    print(f"Request with my-header (disabled): {response.json()}")
++
++if __name__ == "__main__":
++    test_underscore_header()
++    test_underscore_header_disabled()
+diff --git a/repro_alias.py b/repro_alias.py
+new file mode 100644
+index 000000000..3c7cbc197
+--- /dev/null
++++ b/repro_alias.py
+@@ -0,0 +1,40 @@
++from fastapi import FastAPI, Header
++from fastapi.testclient import TestClient
++
++app = FastAPI()
++
++@app.get("/alias")
++async def read_header_alias(my_header: str = Header(None, alias="my_header")):
++    return {"my_header": my_header}
++
++@app.get("/alias_diff")
++async def read_header_alias_diff(something: str = Header(None, alias="my_header")):
++    return {"something": something}
++
++client = TestClient(app)
++
++def test_alias_header():
++    # alias="my_header", convert_underscores=True (default)
++    # field.name is "my_header", alias is "my_header". 
++    # In request_params_to_args, alias == field.name is True, so it becomes "my-header".
++    # Should NOT accept my_header, only my-header
++    response = client.get("/alias", headers={"my_header": "value5"})
++    print(f"Request with my_header (alias=name, default): {response.json()}")
++    
++    response = client.get("/alias", headers={"my-header": "value6"})
++    print(f"Request with my-header (alias=name, default): {response.json()}")
++
++def test_alias_diff_header():
++    # alias="my_header", convert_underscores=True (default)
++    # field.name is "something", alias is "my_header".
++    # In request_params_to_args, alias == field.name is False, so it remains "my_header".
++    # This SHOULD NOT accept my_header, but it probably will.
++    response = client.get("/alias_diff", headers={"my_header": "value7"})
++    print(f"Request with my_header (alias!=name, default): {response.json()}")
++    
++    response = client.get("/alias_diff", headers={"my-header": "value8"})
++    print(f"Request with my-header (alias!=name, default): {response.json()}")
++
++if __name__ == "__main__":
++    test_alias_header()
++    test_alias_diff_header()
+diff --git a/test_headers.py b/test_headers.py
+new file mode 100644
+index 000000000..b2acd6cd7
+--- /dev/null
++++ b/test_headers.py
+@@ -0,0 +1,5 @@
++from starlette.datastructures import Headers
++
++headers = Headers({"my_header": "value5"})
++print(f"Get my_header: {headers.get('my_header')}")
++print(f"Get my-header: {headers.get('my-header')}")

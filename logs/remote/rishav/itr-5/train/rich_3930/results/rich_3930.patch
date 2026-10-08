@@ -1,0 +1,226 @@
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 00000000..7182af25
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,30 @@
++from rich.cells import set_cell_size, chop_cells, cell_len
++
++def test_graphemes():
++    # 💩 is width 2, 🏽 is width 0. Total width 2.
++    text = "💩🏽"
++    print(f"Text: {text}, cell_len: {cell_len(text)}")
++    
++    # Width 2 should return the whole thing
++    print(f"set_cell_size(text, 2): {set_cell_size(text, 2)}")
++    
++    # Width 1 should return a space or empty string, but NOT split the grapheme
++    # In my implementation, it will return " " because current_width (0) < total (1)
++    # and the first grapheme "💩🏽" has width 2, which is > 1.
++    # So it breaks and adds " " * (1 - 0) = " ".
++    print(f"set_cell_size(text, 1): {set_cell_size(text, 1)}")
++
++    # Family emoji: 👨‍👩‍👧‍👦 (Man, Woman, Girl, Boy joined by ZWJ)
++    # Each emoji is width 2, ZWJ is width 0.
++    # Total width is 2 * 4 = 8.
++    family = "👨‍👩‍👧‍👦"
++    print(f"Family: {family}, cell_len: {cell_len(family)}")
++    print(f"set_cell_size(family, 8): {set_cell_size(family, 8)}")
++    print(f"set_cell_size(family, 7): {set_cell_size(family, 7)}")
++
++    # Chop cells
++    text_to_chop = "💩🏽💩🏽" # width 2 + 2 = 4
++    print(f"chop_cells(text_to_chop, 2): {chop_cells(text_to_chop, 2)}")
++
++if __name__ == "__main__":
++    test_graphemes()
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..a43f3eff 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import unicodedata
+ from functools import lru_cache
+ from typing import Callable
+ 
+@@ -32,7 +33,7 @@ _is_single_cell_widths: Callable[[str], bool] = _SINGLE_CELLS.issuperset
+ 
+ @lru_cache(4096)
+ def cached_cell_len(text: str) -> int:
+-    """Get the number of cells required to display text.
++    \"\"\"Get the number of cells required to display text.
+ 
+     This method always caches, which may use up a lot of memory. It is recommended to use
+     `cell_len` over this method.
+@@ -42,21 +43,21 @@ def cached_cell_len(text: str) -> int:
+ 
+     Returns:
+         int: Get the number of cells required to display text.
+-    """
++    \"\"\"
+     if _is_single_cell_widths(text):
+         return len(text)
+     return sum(map(get_character_cell_size, text))
+ 
+ 
+ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> int:
+-    """Get the number of cells required to display text.
++    \"\"\"Get the number of cells required to display text.
+ 
+     Args:
+         text (str): Text to display.
+ 
+     Returns:
+         int: Get the number of cells required to display text.
+-    """
++    \"\"\"
+     if len(text) < 512:
+         return _cell_len(text)
+     if _is_single_cell_widths(text):
+@@ -66,14 +67,14 @@ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> in
+ 
+ @lru_cache(maxsize=4096)
+ def get_character_cell_size(character: str) -> int:
+-    """Get the cell size of a character.
++    \"\"\"Get the cell size of a character.
+ 
+     Args:
+         character (str): A single character.
+ 
+     Returns:
+         int: Number of cells (0, 1 or 2) occupied by that character.
+-    """
++    \"\"\"
+     codepoint = ord(character)
+     _table = CELL_WIDTHS
+     lower_bound = 0
+@@ -93,46 +94,53 @@ def get_character_cell_size(character: str) -> int:
+     return 1
+ 
+ 
+-def set_cell_size(text: str, total: int) -> str:
+-    """Set the length of a string to fit within given number of cells."""
++def split_graphemes(text: str) -> list[str]:
++    \"\"\"Split a string into grapheme clusters.\"\"\"
++    if not text:
++        return []
++
++    graphemes = []
++    current = text[0]
++
++    for i in range(1, len(text)):
++        char = text[i]
++        if unicodedata.combining(char) or char == \"\u200D\" or text[i - 1] == \"\u200D\":
++            current += char
++        else:
++            graphemes.append(current)
++            current = char
++    graphemes.append(current)
++    return graphemes
+ 
+-    if _is_single_cell_widths(text):
+-        size = len(text)
+-        if size < total:
+-            return text + " " * (total - size)
+-        return text[:total]
+ 
++def set_cell_size(text: str, total: int) -> str:
++    \"\"\"Set the length of a string to fit within given number of cells.\"\"\"
+     if total <= 0:
+-        return ""
+-    cell_size = cell_len(text)
+-    if cell_size == total:
+-        return text
+-    if cell_size < total:
+-        return text + " " * (total - cell_size)
++        return \"\"
+ 
+-    start = 0
+-    end = len(text)
++    graphemes = split_graphemes(text)
++    current_text = \"\"
++    current_width = 0
+ 
+-    # Binary search until we find the right size
+-    while True:
+-        pos = (start + end) // 2
+-        before = text[: pos + 1]
+-        before_len = cell_len(before)
+-        if before_len == total + 1 and cell_len(before[-1]) == 2:
+-            return before[:-1] + " "
+-        if before_len == total:
+-            return before
+-        if before_len > total:
+-            end = pos
++    for g in graphemes:
++        g_width = cell_len(g)
++        if current_width + g_width <= total:
++            current_text += g
++            current_width += g_width
+         else:
+-            start = pos
++            break
++
++    if current_width < total:
++        current_text += \" \" * (total - current_width)
++
++    return current_text
+ 
+ 
+ def chop_cells(
+     text: str,
+     width: int,
+ ) -> list[str]:
+-    """Split text into lines such that each line fits within the available (cell) width.
++    \"\"\"Split text into lines such that each line fits within the available (cell) width.
+ 
+     Args:
+         text: The text to fold such that it fits in the given width.
+@@ -141,8 +149,7 @@ def chop_cells(
+     Returns:
+         A list of strings such that each string in the list has cell width
+         less than or equal to the available width.
+-    """
+-    _get_character_cell_size = get_character_cell_size
++    \"\"\"
+     lines: list[list[str]] = [[]]
+ 
+     append_new_line = lines.append
+@@ -150,25 +157,25 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
++    for grapheme in split_graphemes(text):
++        cell_width = cell_len(grapheme)
+         char_doesnt_fit = total_width + cell_width > width
+ 
+         if char_doesnt_fit:
+-            append_new_line([character])
++            append_new_line([grapheme])
+             append_to_last_line = lines[-1].append
+             total_width = cell_width
+         else:
+-            append_to_last_line(character)
++            append_to_last_line(grapheme)
+             total_width += cell_width
+ 
+-    return ["".join(line) for line in lines]
++    return [\"\".join(line) for line in lines]
+ 
+ 
+-if __name__ == "__main__":  # pragma: no cover
+-    print(get_character_cell_size("😽"))
+-    for line in chop_cells("""这是对亚洲语言支持的测试。面对模棱两可的想法，拒绝猜测的诱惑。""", 8):
++if __name__ == \"__main__\":  # pragma: no cover
++    print(get_character_cell_size(\"😽\"))
++    for line in chop_cells(\"\"\"这是对亚洲语言支持的测试。面对模棱两可的想法，拒绝猜测的诱惑。\"\"\", 8):
+         print(line)
+     for n in range(80, 1, -1):
+-        print(set_cell_size("""这是对亚洲语言支持的测试。面对模棱两可的想法，拒绝猜测的诱惑。""", n) + "|")
+-        print("x" * n)
++        print(set_cell_size(\"\"\"这是对亚洲语言支持的测试。面对模棱两可的想法，拒绝猜测的诱惑。\"\"\", n) + \"|\")
++        print(\"x\" * n)

@@ -1,0 +1,106 @@
+diff --git a/fastapi/applications.py b/fastapi/applications.py
+index c7c551e4e..9079c3cd2 100644
+--- a/fastapi/applications.py
++++ b/fastapi/applications.py
+@@ -1,6 +1,6 @@
+ from collections.abc import Awaitable, Callable, Coroutine, Sequence
+ from enum import Enum
+-from typing import Annotated, Any, TypeVar
++from typing import Annotated, Any, Iterator, TypeVar
+ 
+ from annotated_doc import Doc
+ from fastapi import routing
+@@ -1101,6 +1101,12 @@ class FastAPI(Starlette):
+             self._openapi_routes_version = routes_version
+         return self.openapi_schema
+ 
++    def iter_route_contexts(self) -> Iterator[Any]:
++        """
++        Iterate over the route contexts.
++        """
++        yield from self.router.iter_route_contexts()
++
+     def setup(self) -> None:
+         if self.openapi_url:
+ 
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 48c0c2153..f27a0f283 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -2012,6 +2012,13 @@ class APIRouter(routing.Router):
+                 return True
+         return False
+ 
++    def iter_route_contexts(self) -> Iterator[_EffectiveRouteContext | None]:
++        """
++        Iterate over the route contexts.
++        """
++        for _, route_context in _iter_routes_with_context(self.routes):
++            yield route_context
++
+     def add_route(
+         self,
+         path: str,
+@@ -2321,6 +2328,13 @@ class APIRouter(routing.Router):
+ 
+         return decorator
+ 
++    def iter_route_contexts(self) -> Iterator[_EffectiveRouteContext]:
++        """
++        Iterate over the route contexts.
++        """
++        for route, route_context in _iter_routes_with_context(self.routes):
++            yield route_context
++
+     def include_router(
+         self,
+         router: Annotated["APIRouter", Doc("The `APIRouter` to include.")],
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 000000000..53ce3d084
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,43 @@
++
++from fastapi import FastAPI, APIRouter
++from fastapi.routing import _EffectiveRouteContext
++
++def test_iter_route_contexts():
++    app = FastAPI()
++    router = APIRouter()
++    
++    @router.get("/test")
++    def test_endpoint():
++        return {"hello": "world"}
++    
++    app.include_router(router)
++    
++    # Test APIRouter
++    router_contexts = list(router.iter_route_contexts())
++    print(f"Router contexts: {router_contexts}")
++    print(f"Type of first context: {type(router_contexts[0]) if router_contexts else 'None'}")
++    assert len(router_contexts) == 1
++    assert isinstance(router_contexts[0], _EffectiveRouteContext)
++    
++    # Test FastAPI
++    app_contexts = list(app.iter_route_contexts())
++    # FastAPI has its own routes (like /openapi.json, /docs, /redoc)
++    # but we included one router with one route.
++    # Let's check if our route is in there.
++    
++    found = False
++    for ctx in app_contexts:
++        if ctx and ctx.original_route.path == "/test":
++            found = True
++            break
++    assert found, "Route /test not found in app.iter_route_contexts()"
++
++if __name__ == "__main__":
++    try:
++        test_iter_route_contexts()
++        print("Test passed!")
++    except Exception as e:
++        print(f"Test failed: {e}")
++        import traceback
++        traceback.print_exc()
++        exit(1)

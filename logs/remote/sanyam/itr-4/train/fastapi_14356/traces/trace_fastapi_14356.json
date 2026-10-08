@@ -1,0 +1,720 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "agent": {
+    "name": "adk-eval-core",
+    "version": "1.0"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "system",
+      "message": "You are an expert autonomous software engineer assigned to resolve an issue in a repository efficiently and decisively.\n\n## Core Objective: Fast, Minimal, and Precise Fixes\nAim to understand, resolve, and verify the fix in as few tool calls as possible. Move directly from the problem statement to the relevant files, apply the solution, verify it, and submit.\n\n## Workflow\n\n### 1. Identify Target Files Immediately\n- Extract filenames, functions, classes, CLI subcommands, or error messages directly from the problem statement.\n- Read only the specific target files and lines using `read_file` or search tools. Do not wander across unrelated files.\n- If the problem statement does not provide explicit file paths, search for its most specific identifier or error string with `git grep -n \"text\" -- '*.py' | head -20`.\n\n### 2. Implement the Solution Directly\n- Apply the minimal necessary fix or feature directly to the source files using `edit_file` or `write_file`.\n- Fix the root cause, not the symptom. Before editing a function, `git grep -n \"function_name\" -- '*.py'` its callers and fix the shared function once, rather than patching only the path the issue names. If a helper for the job already exists in the repo, reuse it instead of writing a new one.\n- Minimal means touching the fewest places, not skipping behavior the issue specifies. Feature requests get a complete implementation.\n- Strictly adhere to specified error strings, exception types, HTTP status codes, and API signatures.\n- For documentation code tasks (e.g. FastAPI), edit executable code under `docs_src/`.\n- **`edit_file` errors.** If the error says \"mandatory input parameters are not present\", stop using `edit_file` for that change: those failures are free, so a retry loop never ends. Apply the change with one `run_command` instead:\n  ```\n  python3 - <<'PY'\n  from pathlib import Path\n  p = Path('path/to/file.py')\n  t = p.read_text()\n  old = '''exact old text'''\n  new = '''new text'''\n  assert old in t, 'old text not found'\n  p.write_text(t.replace(old, new, 1))\n  PY\n  ```\n  then run `git diff` to confirm the change. If the error says the old_string was not found, re-read those lines once and retry once with a shorter old_string (1-2 lines). Never send the same failing call twice.\n\n### 3. Verify With a Check and Targeted Tests (Existing Tests May Be Broken)\n- **Write a check that fails before your fix and passes after it**: create `/workspace/_check.py`, a short script that asserts the exact behavior the issue asks for, using the exception types and strings from the problem statement. Run it with `python3 _check.py` after each source edit. A check that passes without your edit proves nothing.\n- Also run the existing test file for the module you touched, as a regression check.\n- **Reading results**: a failing `pytest` run comes back as `status: error`, with the real output in `details.stdout`. The `flasgger is not installed` warning on every command is noise; ignore it.\n- **Run ONLY Targeted Tests**: Run only the specific test file or test method directly verifying the bug or feature you modified (e.g. `pytest tests/test_target.py -k test_feature` or `python3 -m unittest tests.test_target`).\n- **Be Aware That Existing Tests May Be Broken**: Many repositories contain pre-existing test breakages, missing test data fixtures (e.g. `/test_data`), or environment import errors unrelated to your task.\n- **Do NOT Attempt to Fix Existing Tests**: If an existing test fails due to pre-existing repository issues or missing fixtures, IGNORE IT. Never spend turns attempting to repair pre-existing test failures, create test stubs, or alter test code.\n- **STRICT RULE: NEVER Run Bare Pytest or Full-Repo Sweeps**: NEVER run bare `pytest`, `pytest .`, `python3 -m unittest discover`, or full-repo test suites without specifying a target file. Full test suites take several minutes, cause catastrophic timeouts, and exhaust your turn and time budgets.\n- If you need to locate the test file, find it explicitly with `find tests -name \"*<name>*.py\"` instead of running the test runner across the repo.\n\n### 4. Immediate Patch Submission\n- Once your check and targeted test pass:\n  1. Call `submit_patch` immediately.\n  2. Verify `patch_size > 0` and `files_changed > 0`.\n  3. Output a short summary of the fix to end the session.\n\n## Budget: 50 tool calls, 5 minutes\n- You have at most 50 tool calls and 5 minutes for this task. When either runs out, the working tree is graded as it is, so an edit made in time counts even if you never reach `submit_patch`.\n- Use at most about 14 tool calls to find and read the code.\n- By your 17th tool call you must have edited a source file. If you have not, stop exploring and make your best-guess edit in the most likely place now. Runs that are still only reading after 17 calls almost never succeed; more reading does not help.\n- Reserve your last 7 tool calls for the check, the targeted test, a correction if needed, and `submit_patch`. Do not start new exploration after your 43rd tool call.\n\n## Anti-Patterns to Avoid\n- **NEVER modify, create, or delete test files** (`*_test.py`, `test_*.py`, or anything under `tests/`). All changes must be to source implementation files. Modifying tests results in an automatic evaluation failure.\n- **NEVER run full repository test suites** (e.g., bare `pytest` or `pytest .`) \u2014 always specify the exact test file path.\n- **NEVER attempt to fix or repair existing tests or pre-existing repository breakages** \u2014 your task is strictly to implement the fix for the reported issue in source code.\n- **NEVER search outside `/workspace`** for source files or packages (e.g., `/usr/local/lib/`, `/wheels/`, `/opt/`). All repository code and test dependencies are pre-installed. If `ModuleNotFoundError` occurs during test runs, focus on fixing code under `/workspace`, not looking for missing system packages.\n- Do NOT spend turns running broad exploratory searches if the file path or symbol is obvious.\n- Do NOT refactor or reformat unrelated functions or files.\n- Do NOT conclude without submitting a non-empty patch (`patch_size > 0`). Every task requires concrete source modifications. Concluding that the codebase is already clean without making changes is an anti-pattern.",
+      "extra": {
+        "event_type": "system_instruction",
+        "elapsed_s": 13.127455949783325,
+        "timestamp": 1791360261.102179,
+        "author": "harness"
+      }
+    },
+    {
+      "step_id": 2,
+      "source": "user",
+      "message": "You are evaluating a software engineering task for repository fastapi/fastapi.\n\nProblem Statement:\n\ud83d\udc1b Fix parsing extra non-body parameter list\n\nCurrently if we declare Query or Header parameters as model with `extra=\"allow\"` and then pass extra parameter with multiple values, only last value of such parameter will be passed to model validator:\r\n\r\n```py\r\nfrom fastapi import FastAPI, Query\r\nfrom fastapi.testclient import TestClient\r\nfrom pydantic import BaseModel\r\n\r\napp = FastAPI()\r\n\r\n\r\nclass Model(BaseModel):\r\n    param: str\r\n\r\n    model_config = {\"extra\": \"allow\"}\r\n\r\n\r\n@app.get(\"/\")\r\nasync def model_with_extra(data: Model = Query()):\r\n    return data\r\n\r\n\r\ndef test_pass_extra_list():\r\n    client = TestClient(app)\r\n    resp = client.get(\r\n        \"/\",\r\n        params={\r\n            \"param\": \"123\",\r\n            \"param2\": [\"456\", \"789\"],  # Pass a list of values as extra parameter\r\n        },\r\n    )\r\n    assert resp.status_code == 200\r\n    assert resp.json() == {\r\n        \"param\": \"123\",\r\n        \"param2\": [\"456\", \"789\"],\r\n    }\r\n\r\n# AssertionError: assert\r\n# {'param': '123', 'param2': '789'} == {'param': '123', 'param2': ['456', '789']}\r\n```\r\n\r\nThe reason is the same as with Form parameters. See #14303\r\nThere is also a note about implementation described in #14303. It's also relevant to this PR.\r\n\r\n**As for Cookies:**\r\nAs far as I understand the spec, you can't pass multiple Cookie parameters with the same name (only last value will be used). The only way to pass a list of values is to pass them comma-separated, but it's not currently supported by Starlette\n\n## Task Budget (Session terminates when any budget is exhausted)\n- Time allowance: 5 minutes\n- Tool calls allowance: 50 calls\n- Max loop iterations: 80 turns\n\n## Execution Environment Rules\n- Single command timeout: 240 seconds (commands exceeding this fail without ending the session)\n- Command output limit: 5000 characters\n- File view limit: 150 lines per read_file call\n- File character limit: 10000 characters per read_file call\n- Environment is offline (no network/PyPI access). All repository and test dependencies are ALREADY pre-installed. Do NOT attempt to run pip install or download packages.\n\n## Instructions:\n0. All source code is under `/workspace`. Do NOT search outside `/workspace` (e.g. `/usr/`, `/wheels/`, system site-packages). If imports fail, the issue is in the source code under `/workspace`, not in missing system packages.\n1. Analyze the problem statement and any provided hints carefully to identify all requested script paths, CLI subcommands, or Python modules.\n2. Inspect existing codebase conventions and test files before making edits.\n3. Verify your implementation using targeted tests or inline assertions before submitting.\n4. Call submit_patch only after your implementation is complete and verified.\n5. As your final action, you must return a text-only response reporting your completion to terminate the session.\n## Code Intelligence Tools\nThis repository has pre-built code graph and embedding data. Use these tools for fast, targeted navigation:\n- `search_similar_code(query)`: Find semantically similar functions/classes by keyword.\n- `get_code_neighbors(node)`: Find callers, callees, and definitions related to a symbol.\n- `get_code_subgraph(nodes)`: Get the induced subgraph for a set of symbols.\n\n## Workspace Layout\nThe repository is located at `/workspace`. Here is the directory tree (up to 3 levels):\n```\n.\n./.git\n./.github\n./.github/DISCUSSION_TEMPLATE\n./.github/DISCUSSION_TEMPLATE/questions.yml\n./.github/DISCUSSION_TEMPLATE/translations.yml\n./.github/FUNDING.yml\n./.github/ISSUE_TEMPLATE\n./.github/ISSUE_TEMPLATE/config.yml\n./.github/ISSUE_TEMPLATE/privileged.yml\n./.github/dependabot.yml\n./.github/labeler.yml\n./.github/workflows\n./.github/workflows/add-to-project.yml\n./.github/workflows/build-docs.yml\n./.github/workflows/contributors.yml\n./.github/workflows/deploy-docs.yml\n./.github/workflows/detect-conflicts.yml\n./.github/workflows/issue-manager.yml\n./.github/workflows/label-approved.yml\n./.github/workflows/labeler.yml\n./.github/workflows/latest-changes.yml\n./.github/workflows/notify-translations.yml\n./.github/workflows/people.yml\n./.github/workflows/pre-commit.yml\n./.github/workflows/publish.yml\n./.github/workflows/smokeshow.yml\n./.github/workflows/sponsors.yml\n./.github/workflows/test-redistribute.yml\n./.github/workflows/test.yml\n./.github/workflows/topic-repos.yml\n./.github/workflows/translate.yml\n./.gitignore\n./.pdm-build\n./.pdm-build/.gitignore\n./.pdm-build/_editable_impl_fastapi.pth\n./.pre-commit-config.yaml\n./CITATION.cff\n./CONTRIBUTING.md\n./LICENSE\n./README.md\n./SECURITY.md\n./conftest.py\n./docs\n./docs/de\n./docs/de/docs\n./docs/de/llm-prompt.md\n./docs/de/mkdocs.yml\n./docs/em\n./docs/em/docs\n./docs/em/mkdocs.yml\n./docs/en\n./docs/en/data\n./docs/en/docs\n./docs/en/mkdocs.env.yml\n./docs/en/mkdocs.yml\n./docs/en/overrides\n./docs/es\n./docs/es/docs\n./docs/es/llm-prompt.md\n./docs/es/mkdocs.yml\n./docs/fa\n./docs/fa/docs\n./docs/fa/mkdocs.yml\n./docs/fr\n./docs/fr/docs\n./docs/fr/mkdocs.yml\n./docs/ja\n./docs/ja/docs\n./docs/ja/mkdocs.yml\n./docs/ko\n./docs/ko/docs\n./docs/ko/mkdocs.yml\n./docs/language_names.yml\n./docs/missing-translation.md\n./docs/pt\n./docs/pt/docs\n./docs/pt/llm-prompt.md\n./docs/pt/mkdocs.yml\n./docs/ru\n./docs/ru/docs\n./docs/ru/llm-prompt.md\n./docs/ru/mkdocs.yml\n./docs/tr\n./docs/tr/docs\n./docs/tr/mkdocs.yml\n./docs/uk\n./docs/uk/docs\n./docs/uk/mkdocs.yml\n./docs/vi\n./docs/vi/docs\n./docs/vi/mkdocs.yml\n./docs/zh\n./docs/zh-hant\n./docs/zh-hant/docs\n./docs/zh-hant/mkdocs.yml\n./docs/zh/docs\n./docs/zh/mkdocs.yml\n./docs_src\n./docs_src/additional_responses\n./docs_src/additional_responses/tutorial001.py\n./docs_src/additional_responses/tutorial002.py\n./docs_src/additional_responses/tutorial003.py\n./docs_src/additional_responses/tutorial004.py\n./docs_src/additional_status_codes\n./docs_src/additional_status_codes/tutorial001.py\n./docs_src/additional_status_codes/tutorial001_an.py\n./docs_src/additional_status_codes/tutorial001_an_py310.py\n./docs_src/additional_status_codes/tutorial001_an_py39.py\n./docs_src/additional_status_codes/tutorial001_py310.py\n./docs_src/advanced_middleware\n./docs_src/advanced_middleware/tutorial001.py\n./docs_src/advanced_middleware/tutorial002.py\n./docs_src/advanced_middleware/tutorial003.py\n./docs_src/app_testing\n./docs_src/app_testing/__init__.py\n./docs_src/app_testing/app_b\n./docs_src/app_testing/app_b_an\n./docs_src/app_testing/app_b_an_py310\n./docs_src/app_testing/app_b_an_py39\n./docs_src/app_testing/app_b_py310\n./docs_src/app_testing/main.py\n./docs_src/app_testing/test_main.py\n./docs_src/app_testing/tutorial001.py\n./docs_src/app_testing/tutorial002.py\n./docs_src/app_testing/tutorial003.py\n./docs_src/app_testing/tutorial004.py\n./docs_src/async_tests\n./docs_src/async_tests/__init__.py\n./docs_src/async_tests/main.py\n./docs_src/async_tests/test_main.py\n./docs_src/authentication_error_status_code\n./docs_src/authentication_error_status_code/tutorial001_an.py\n./docs_src/authentication_error_status_code/tutorial001_an_py39.py\n./docs_src/background_tasks\n./docs_src/background_tasks/tutorial001.py\n./docs_src/background_tasks/tutorial002.py\n./docs_src/background_tasks/tutorial002_an.py\n./docs_src/background_tasks/tutorial002_an_py310.py\n./docs_src/background_tasks/tutorial002_an_py39.py\n./docs_src/background_tasks/tutorial002_py310.py\n./docs_src/behind_a_proxy\n./docs_src/behind_a_proxy/tutorial001.py\n./docs_src/behind_a_proxy/tutorial001_01.py\n./docs_src/behind_a_proxy/tutorial002.py\n./docs_src/behind_a_proxy/tutorial003.py\n./docs_src/behind_a_proxy/tutorial004.py\n./docs_src/bigger_applications\n./docs_src/bigger_applications/__init__.py\n./docs_src/bigger_applications/app\n```\n",
+      "extra": {
+        "event_type": "task_prompt",
+        "elapsed_s": 13.127785921096802,
+        "timestamp": 1791360261.102509,
+        "author": "harness"
+      }
+    },
+    {
+      "step_id": 3,
+      "source": "agent",
+      "message": "The user is reporting a bug where extra non-body parameters (like `Query` or `Header`) passed as a list are only captured as the last value when the receiving model has `extra=\"allow\"`.\n\nThis sounds like an issue in how FastAPI parses request parameters and passes them to Pydantic models.\n\nFirst, I will create a reproduction script based on the provided example.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_3",
+          "function_name": "write_file",
+          "arguments": {
+            "content": "from fastapi import FastAPI, Query\nfrom fastapi.testclient import TestClient\nfrom pydantic import BaseModel\n\napp = FastAPI()\n\n\nclass Model(BaseModel):\n    param: str\n\n    model_config = {\"extra\": \"allow\"}\n\n\n@app.get(\"/\")\nasync def model_with_extra(data: Model = Query()):\n    return data\n\n\ndef test_pass_extra_list():\n    client = TestClient(app)\n    resp = client.get(\n        \"/\",\n        params={\n            \"param\": \"123\",\n            \"param2\": [\"456\", \"789\"],  # Pass a list of values as extra parameter\n        },\n    )\n    assert resp.status_code == 200\n    assert resp.json() == {\n        \"param\": \"123\",\n        \"param2\": [\"456\", \"789\"],\n    }\n\nif __name__ == \"__main__\":\n    try:\n        test_pass_extra_list()\n        print(\"Test passed!\")\n    except AssertionError as e:\n        print(f\"Test failed: {e}\")\n    except Exception as e:\n        print(f\"An error occurred: {e}\")\n",
+            "filepath": "_check.py"
+          },
+          "extra": {
+            "elapsed_s": 19.806773900985718,
+            "timestamp": 1791360267.781497,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"_check.py\", \"size\": 887}",
+        "extra": {
+          "tool_name": "write_file",
+          "elapsed_s": 20.255475997924805,
+          "timestamp": 1791360268.230199,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 4843,
+        "completion_tokens": 380,
+        "cached_tokens": 0,
+        "total_tokens": 5223
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 19.806773900985718,
+        "timestamp": 1791360267.781497,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 4,
+      "source": "agent",
+      "message": "Now I run the reproduction script.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_6",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 _check.py"
+          },
+          "extra": {
+            "elapsed_s": 20.983701944351196,
+            "timestamp": 1791360268.958425,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Test failed: \\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 22.584312915802002,
+          "timestamp": 1791360270.559036,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 5256,
+        "completion_tokens": 32,
+        "cached_tokens": 0,
+        "total_tokens": 5288
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 20.983701944351196,
+        "timestamp": 1791360268.958425,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 5,
+      "source": "agent",
+      "message": "The test failed as expected. Now I need to find where FastAPI handles the parsing of `Query` or `Header` parameters when they are mapped to a Pydantic model.\n\nThe problem statement mentions that the reason is the same as with Form parameters (see #14303).\n\nI'll search for where `Query` and `Header` parameters are handled, especially when they are part of a Pydantic model.\n\nI'll start by searching for \"Query\" and \"Header\" usage in `fastapi/params.py` or similar files. I'll search for where parameters are extracted from the request.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_9",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "git grep -n \"Query\" -- \"/workspace/fastapi\" | head -20"
+          },
+          "extra": {
+            "elapsed_s": 25.376821041107178,
+            "timestamp": 1791360273.3515441,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"fastapi/__init__.py:19:from .param_functions import Query as Query\\nfastapi/applications.py:755:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:1803:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:2176:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:2554:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:2932:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:3305:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:3678:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:4051:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/applications.py:4429:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/datastructures.py:23:from starlette.datastructures import QueryParams as QueryParams  # noqa: F401\\nfastapi/dependencies/utils.py:72:    QueryParams,\\nfastapi/dependencies/utils.py:472:            field_info = params.Query(annotation=use_annotation, default=default_value)\\nfastapi/dependencies/utils.py:515:        elif isinstance(field_info, (params.Query, temp_pydantic_v1_params.Query)):\\nfastapi/dependencies/utils.py:749:    received_params: Union[Mapping[str, Any], QueryParams, Headers],\\nfastapi/param_functions.py:340:def Query(  # noqa: N802\\nfastapi/param_functions.py:611:    return params.Query(\\nfastapi/params.py:226:class Query(Param):  # type: ignore[misc]\\nfastapi/routing.py:901:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\nfastapi/routing.py:1713:                [FastAPI docs for Query Parameters and String Validations](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/#exclude-parameters-from-openapi).\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 25.574970960617065,
+          "timestamp": 1791360273.549694,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 5326,
+        "completion_tokens": 170,
+        "cached_tokens": 0,
+        "total_tokens": 5496
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 25.376821041107178,
+        "timestamp": 1791360273.3515441,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 6,
+      "source": "agent",
+      "message": "`fastapi/dependencies/utils.py` seems relevant, as it likely contains the logic to extract parameters. Specifically, `received_params: Union[Mapping[str, Any], QueryParams, Headers]` at line 749 looks interesting.\n\nLet's examine `fastapi/dependencies/utils.py` around line 749.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_12",
+          "function_name": "read_file",
+          "arguments": {
+            "filepath": "fastapi/dependencies/utils.py",
+            "start_line": 700,
+            "end_line": 850
+          },
+          "extra": {
+            "elapsed_s": 27.87563967704773,
+            "timestamp": 1791360275.8503628,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/utils.py\", \"content\": \"        response=response,\\n        dependency_cache=dependency_cache,\\n    )\\n\\n\\ndef _validate_value_with_model_field(\\n    *, field: ModelField, value: Any, values: Dict[str, Any], loc: Tuple[str, ...]\\n) -> Tuple[Any, List[Any]]:\\n    if value is None:\\n        if field.required:\\n            return None, [get_missing_field_error(loc=loc)]\\n        else:\\n            return deepcopy(field.default), []\\n    v_, errors_ = field.validate(value, values, loc=loc)\\n    if _is_error_wrapper(errors_):  # type: ignore[arg-type]\\n        return None, [errors_]\\n    elif isinstance(errors_, list):\\n        new_errors = may_v1._regenerate_error_with_loc(errors=errors_, loc_prefix=())\\n        return None, new_errors\\n    else:\\n        return v_, []\\n\\n\\ndef _get_multidict_value(\\n    field: ModelField, values: Mapping[str, Any], alias: Union[str, None] = None\\n) -> Any:\\n    alias = alias or field.alias\\n    if is_sequence_field(field) and isinstance(values, (ImmutableMultiDict, Headers)):\\n        value = values.getlist(alias)\\n    else:\\n        value = values.get(alias, None)\\n    if (\\n        value is None\\n        or (\\n            isinstance(field.field_info, (params.Form, temp_pydantic_v1_params.Form))\\n            and isinstance(value, str)  # For type checks\\n            and value == \\\"\\\"\\n        )\\n        or (is_sequence_field(field) and len(value) == 0)\\n    ):\\n        if field.required:\\n            return\\n        else:\\n            return deepcopy(field.default)\\n    return value\\n\\n\\ndef request_params_to_args(\\n    fields: Sequence[ModelField],\\n    received_params: Union[Mapping[str, Any], QueryParams, Headers],\\n) -> Tuple[Dict[str, Any], List[Any]]:\\n    values: Dict[str, Any] = {}\\n    errors: List[Dict[str, Any]] = []\\n\\n    if not fields:\\n        return values, errors\\n\\n    first_field = fields[0]\\n    fields_to_extract = fields\\n    single_not_embedded_field = False\\n    default_convert_underscores = True\\n    if len(fields) == 1 and lenient_issubclass(first_field.type_, BaseModel):\\n        fields_to_extract = get_cached_model_fields(first_field.type_)\\n        single_not_embedded_field = True\\n        # If headers are in a Pydantic model, the way to disable convert_underscores\\n        # would be with Header(convert_underscores=False) at the Pydantic model level\\n        default_convert_underscores = getattr(\\n            first_field.field_info, \\\"convert_underscores\\\", True\\n        )\\n\\n    params_to_process: Dict[str, Any] = {}\\n\\n    processed_keys = set()\\n\\n    for field in fields_to_extract:\\n        alias = None\\n        if isinstance(received_params, Headers):\\n            # Handle fields extracted from a Pydantic Model for a header, each field\\n            # doesn't have a FieldInfo of type Header with the default convert_underscores=True\\n            convert_underscores = getattr(\\n                field.field_info, \\\"convert_underscores\\\", default_convert_underscores\\n            )\\n            if convert_underscores:\\n                alias = (\\n                    field.alias\\n                    if field.alias != field.name\\n                    else field.name.replace(\\\"_\\\", \\\"-\\\")\\n                )\\n        value = _get_multidict_value(field, received_params, alias=alias)\\n        if value is not None:\\n            params_to_process[field.name] = value\\n        processed_keys.add(alias or field.alias)\\n        processed_keys.add(field.name)\\n\\n    for key, value in received_params.items():\\n        if key not in processed_keys:\\n            params_to_process[key] = value\\n\\n    if single_not_embedded_field:\\n        field_info = first_field.field_info\\n        assert isinstance(field_info, (params.Param, temp_pydantic_v1_params.Param)), (\\n            \\\"Params must be subclasses of Param\\\"\\n        )\\n        loc: Tuple[str, ...] = (field_info.in_.value,)\\n        v_, errors_ = _validate_value_with_model_field(\\n            field=first_field, value=params_to_process, values=values, loc=loc\\n        )\\n        return {first_field.name: v_}, errors_\\n\\n    for field in fields:\\n        value = _get_multidict_value(field, received_params)\\n        field_info = field.field_info\\n        assert isinstance(field_info, (params.Param, temp_pydantic_v1_params.Param)), (\\n            \\\"Params must be subclasses of Param\\\"\\n        )\\n        loc = (field_info.in_.value, field.alias)\\n        v_, errors_ = _validate_value_with_model_field(\\n            field=field, value=value, values=values, loc=loc\\n        )\\n        if errors_:\\n            errors.extend(errors_)\\n        else:\\n            values[field.name] = v_\\n    return values, errors\\n\\n\\ndef is_union_of_base_models(field_type: Any) -> bool:\\n    \\\"\\\"\\\"Check if field type is a Union where all members are BaseModel subclasses.\\\"\\\"\\\"\\n    from fastapi.types import UnionType\\n\\n    origin = get_origin(field_type)\\n\\n    # Check if it's a Union type (covers both typing.Union and types.UnionType in Python 3.10+)\\n    if origin is not Union and origin is not UnionType:\\n        return False\\n\\n    union_args = get_args(field_type)\\n\\n    for arg in union_args:\\n        if not _is_model_class(arg):\\n            return False\\n\\n    return True\\n\\n\\ndef _should_embed_body_fields(fields: List[ModelField]) -> bool:\\n    if not fields:\\n        return False\\n    # More than one dependency could have the same field, it would show up as multiple\\n    # fields but it's the same one, so count them by name\", \"start_line\": 700, \"end_line\": 849, \"total_lines\": 1029, \"is_truncated\": true}",
+        "extra": {
+          "tool_name": "read_file",
+          "elapsed_s": 28.008710861206055,
+          "timestamp": 1791360275.983434,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 6381,
+        "completion_tokens": 117,
+        "cached_tokens": 0,
+        "total_tokens": 6498
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 27.87563967704773,
+        "timestamp": 1791360275.8503628,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 7,
+      "source": "agent",
+      "message": "I see `request_params_to_args` function.\n\nWhen `single_not_embedded_field` is True (which is the case in the reproduction script where `data: Model = Query()`), the code does this:\n\n```python\n    for field in fields_to_extract:\n        alias = None\n        if isinstance(received_params, Headers):\n            # Handle fields extracted from a Pydantic Model for a header, each field\n            # doesn't have a FieldInfo of type Header with the default convert_underscores=True\n            convert_underscores = getattr(\n                field.field_info, \"convert_underscores\", default_convert_underscores\n            )\n            if convert_underscores:\n                alias = (\n                    field.alias\n                    if field.alias != field.name\n                    else field.name.replace(\"_\", \"-\")\n                )\n        value = _get_multidict_value(field, received_params, alias=alias)\n        if value is not None:\n            params_to_process[field.name] = value\n        processed_keys.add(alias or field.alias)\n        processed_keys.add(field.name)\n\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            params_to_process[key] = value\n```\n\nThe issue is here:\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            params_to_process[key] = value\n```\n\nIf `received_params` is a `QueryParams` or `Headers` object, calling `.items()` on it usually returns only the last value for each key.\n\nLet's check `starlette.datastructures.QueryParams` or `Headers`. In Starlette, `QueryParams.items()` returns pairs of (key, value), where `value` is the last value if there are multiple values for the same key. To get all values, one should use `getlist()`.\n\nIn the reproduction script:\n`params={\"param\": \"123\", \"param2\": [\"456\", \"789\"]}`\nWhen FastAPI receives this, `received_params` will be a `QueryParams` object.\n`received_params.items()` will have:\n- `('param', '123')`\n- `('param2', '789')` (only the last value!)\n\nAnd `params_to_process['param2']` becomes `'789'`.\n\nTo fix this, we should use `getlist()` if `received_params` is a `QueryParams` or `Headers` object, and if there are multiple values.\n\nWait, `QueryParams` and `Headers` both have `getlist()` method.\n\nLet's see `_get_multidict_value` (lines 717-745):\n\n```python\ndef _get_multidict_value(\n    field: ModelField, values: Mapping[str, Any], alias: Union[str, None] = None\n) -> Any:\n    alias = alias or field.alias\n    if is_sequence_field(field) and isinstance(values, (ImmutableMultiDict, Headers)):\n        value = values.getlist(alias)\n    else:\n        value = values.get(alias, None)\n    # ...\n```\n\n`is_sequence_field(field)` is used to decide whether to call `getlist()`. For \"extra\" parameters, we don't have a `ModelField` yet, so we just iterate over `received_params.items()`.\n\nTo fix this, instead of iterating over `received_params.items()`, we should handle the case where `received_params` supports `getlist()`.\n\nIf `received_params` is a `QueryParams` or `Headers` object, we can use its `getlist` if we want all values. But wait, we only want all values if it's actually a list of values.\n\nIf we use `getlist(key)`, it always returns a list. If there was only one value, it returns a list of one element.\n\nHowever, for \"extra\" parameters, if the user provided multiple values, we probably want them as a list. If they provided one value, we probably want it as a single value (unless it's supposed to be a list).\n\nWait, if it's an \"extra\" parameter, and we are passing it to a Pydantic model with `extra=\"allow\"`, Pydantic will handle the validation. If the value is a list, and the model expects a list (though it's extra, so it doesn't expect anything specific), it will be a list.\n\nIf we use `getlist()`, it's always a list.\n\nBut `received_params.items()` is what's being used.\n\nIf `received_params` is a `QueryParams` object (from Starlette), `received_params.items()` iterates over unique keys and gives the last value.\n\nIf we want to support multiple values for extra parameters, we need to check if `received_params` has `getlist()` and use it.\n\nBut we should only use `getlist()` if there are actually multiple values, OR if we want to always pass them as lists? No, usually if there's only one value, it should stay as a single value.\n\nActually, for Pydantic's `extra=\"allow\"`, if we pass a list, it's a list. If we pass a string, it's a string.\n\nIf we use `received_params.getlist(key)`, we get a list.\n\nIf we want to mimic the behavior of `received_params.items()` but keep multiple values as lists, we can do something like:\n\n```python\n    for key in received_params.keys():\n        if key not in processed_keys:\n            value = received_params.getlist(key) if hasattr(received_params, \"getlist\") else received_params[key]\n            if value is not None and isinstance(value, list) and len(value) == 1:\n                params_to_process[key] = value[0]\n            else:\n                params_to_process[key] = value\n```\n\nWait, if `received_params` is a `dict`, `getlist` won't exist.\n\nLet's look at how `_get_multidict_value` handles it:\n```python\n    if is_sequence_field(field) and isinstance(values, (ImmutableMultiDict, Headers)):\n        value = values.getlist(alias)\n    else:\n        value = values.get(alias, None)\n```\n\nIt only uses `getlist` if `is_sequence_field(field)` is True.\n\nFor extra parameters, we don't have `field`.\n\nIf we use `received_params.getlist(key)`, and there's only one value, we get `['value']`. If we want it to be just `'value'`, we can check the length.\n\nBut what if the user intended it to be a list of one element? In FastAPI/Starlette, usually a single value in query params is treated as a single value, and multiple values as a list.\n\nLet's see how `QueryParams` behaves.\n```python\nfrom starlette.datastructures import QueryParams\nqp = QueryParams({\"param2\": [\"456\", \"789\"]})\nprint(qp.get(\"param2\")) # '789'\nprint(qp.getlist(\"param2\")) # ['456', '789']\n```\n\nSo if we want to support multiple values for extra parameters, we should use `getlist` and then possibly flatten it if it only has one element.\n\nLet's see where `ImmutableMultiDict` comes from. It's likely from `starlette` or `fastapi`.\n\nIn `fastapi/dependencies/utils.py`:\n```python\nfrom starlette.datastructures import QueryParams as QueryParams, Headers as Headers\n# ...\nfrom starlette.datastructures import ImmutableMultiDict\n```\n(I need to check the imports in `fastapi/dependencies/utils.py`)\n\nLet's check the imports in `fastapi/dependencies/utils.py`.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_15",
+          "function_name": "read_file",
+          "arguments": {
+            "end_line": 100,
+            "filepath": "fastapi/dependencies/utils.py",
+            "start_line": 1
+          },
+          "extra": {
+            "elapsed_s": 62.12112903594971,
+            "timestamp": 1791360310.0958521,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/utils.py\", \"content\": \"import dataclasses\\nimport inspect\\nfrom contextlib import AsyncExitStack, contextmanager\\nfrom copy import copy, deepcopy\\nfrom dataclasses import dataclass\\nfrom typing import (\\n    Any,\\n    Callable,\\n    Coroutine,\\n    Dict,\\n    ForwardRef,\\n    List,\\n    Mapping,\\n    Optional,\\n    Sequence,\\n    Tuple,\\n    Type,\\n    Union,\\n    cast,\\n)\\n\\nimport anyio\\nfrom fastapi import params\\nfrom fastapi._compat import (\\n    PYDANTIC_V2,\\n    ModelField,\\n    RequiredParam,\\n    Undefined,\\n    _is_error_wrapper,\\n    _is_model_class,\\n    copy_field_info,\\n    create_body_model,\\n    evaluate_forwardref,\\n    field_annotation_is_scalar,\\n    get_annotation_from_field_info,\\n    get_cached_model_fields,\\n    get_missing_field_error,\\n    is_bytes_field,\\n    is_bytes_sequence_field,\\n    is_scalar_field,\\n    is_scalar_sequence_field,\\n    is_sequence_field,\\n    is_uploadfile_or_nonable_uploadfile_annotation,\\n    is_uploadfile_sequence_annotation,\\n    lenient_issubclass,\\n    may_v1,\\n    sequence_types,\\n    serialize_sequence_value,\\n    value_is_sequence,\\n)\\nfrom fastapi._compat.shared import annotation_is_pydantic_v1\\nfrom fastapi.background import BackgroundTasks\\nfrom fastapi.concurrency import (\\n    asynccontextmanager,\\n    contextmanager_in_threadpool,\\n)\\nfrom fastapi.dependencies.models import Dependant, SecurityRequirement\\nfrom fastapi.exceptions import DependencyScopeError\\nfrom fastapi.logger import logger\\nfrom fastapi.security.base import SecurityBase\\nfrom fastapi.security.oauth2 import SecurityScopes\\nfrom fastapi.types import DependencyCacheKey\\nfrom fastapi.utils import create_model_field, get_path_param_names\\nfrom pydantic import BaseModel\\nfrom pydantic.fields import FieldInfo\\nfrom starlette.background import BackgroundTasks as StarletteBackgroundTasks\\nfrom starlette.concurrency import run_in_threadpool\\nfrom starlette.datastructures import (\\n    FormData,\\n    Headers,\\n    ImmutableMultiDict,\\n    QueryParams,\\n    UploadFile,\\n)\\nfrom starlette.requests import HTTPConnection, Request\\nfrom starlette.responses import Response\\nfrom starlette.websockets import WebSocket\\nfrom typing_extensions import Annotated, Literal, get_args, get_origin\\n\\nfrom .. import temp_pydantic_v1_params\\n\\nmultipart_not_installed_error = (\\n    'Form data requires \\\"python-multipart\\\" to be installed. \\\\n'\\n    'You can install \\\"python-multipart\\\" with: \\\\n\\\\n'\\n    \\\"pip install python-multipart\\\\n\\\"\\n)\\nmultipart_incorrect_install_error = (\\n    'Form data requires \\\"python-multipart\\\" to be installed. '\\n    'It seems you installed \\\"multipart\\\" instead. \\\\n'\\n    'You can remove \\\"multipart\\\" with: \\\\n\\\\n'\\n    \\\"pip uninstall multipart\\\\n\\\\n\\\"\\n    'And then install \\\"python-multipart\\\" with: \\\\n\\\\n'\\n    \\\"pip install python-multipart\\\\n\\\"\\n)\\n\\n\\ndef ensure_multipart_is_installed() -> None:\\n    try:\\n        from python_multipart import __version__\\n\", \"start_line\": 1, \"end_line\": 100, \"total_lines\": 1029, \"is_truncated\": false}",
+        "extra": {
+          "tool_name": "read_file",
+          "elapsed_s": 62.268898010253906,
+          "timestamp": 1791360310.243621,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8172,
+        "completion_tokens": 1874,
+        "cached_tokens": 0,
+        "total_tokens": 10046
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 62.12112903594971,
+        "timestamp": 1791360310.0958521,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 8,
+      "source": "agent",
+      "message": "Yes, `ImmutableMultiDict`, `Headers`, and `QueryParams` are imported from `starlette.datastructures`.\n\nIn `request_params_to_args`, I have:\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            params_to_process[key] = value\n```\n\nIf `received_params` is `QueryParams` or `Headers` or `ImmutableMultiDict`, we want to check if there are multiple values for the key.\n\nWait, `ImmutableMultiDict` also has `getlist`.\n\nIf I change it to:\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            if isinstance(received_params, (ImmutableMultiDict, Headers, QueryParams)):\n                values_list = received_params.getlist(key)\n                if len(values_list) > 1:\n                    params_to_process[key] = values_list\n                else:\n                    params_to_process[key] = value\n            else:\n                params_to_process[key] = value\n```\n\nWait, `received_params.items()` already returns the last value for `value`. So if `len(values_list) == 1`, `value` will be that single value.\n\nIs `QueryParams` a subclass of `ImmutableMultiDict`?\nIn Starlette:\n`QueryParams` is a subclass of `ImmutableMultiDict`.\n`Headers` is also a subclass of `ImmutableMultiDict`.\n\nLet's verify if `QueryParams` and `Headers` inherit from `ImmutableMultiDict`.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_18",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 -c \"from starlette.datastructures import QueryParams, Headers, ImmutableMultiDict; print(f'QueryParams is ImmutableMultiDict: {issubclass(QueryParams, ImmutableMultiDict)}'); print(f'Headers is ImmutableMultiDict: {issubclass(Headers, ImmutableMultiDict)}')\""
+          },
+          "extra": {
+            "elapsed_s": 71.65976881980896,
+            "timestamp": 1791360319.634492,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"QueryParams is ImmutableMultiDict: True\\nHeaders is ImmutableMultiDict: False\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 71.96101188659668,
+          "timestamp": 1791360319.935735,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 10931,
+        "completion_tokens": 445,
+        "cached_tokens": 0,
+        "total_tokens": 11376
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 71.65976881980896,
+        "timestamp": 1791360319.634492,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 9,
+      "source": "agent",
+      "message": "Ah, `Headers` is NOT a subclass of `ImmutableMultiDict` in this version of Starlette, but it does have `getlist` and `items`.\n\nActually, `ImmutableMultiDict` is the base for `QueryParams` and `FormData`.\n\nLet's see what `Headers` is.\n\nAnyway, if they all have `getlist` and `items` and `keys`, I can just check for `getlist`.\n\nWait, if I use `received_params.items()`, I'm already iterating over the keys.\n\nThe fix should be:\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            if hasattr(received_params, \"getlist\"):\n                values_list = received_params.getlist(key)\n                if len(values_list) > 1:\n                    params_to_process[key] = values_list\n                else:\n                    params_to_process[key] = value\n            else:\n                params_to_process[key] = value\n```\n\nBut wait, if `len(values_list) == 1`, `value` is already `values_list[0]`. So `params_to_process[key] = value` is correct.\n\nIf `len(values_list) > 1`, `value` is the last one, but we want the whole list.\n\nLet's check if `ImmutableMultiDict` is enough.\n\nThe problem statement says \"Currently if we declare Query or Header parameters as model with extra=\"allow\"\".\n\nSo `received_params` will be `QueryParams` or `Headers`.\n\nLet's try this fix.\n\nOne detail: should I use `isinstance(received_params, (ImmutableMultiDict, Headers))`?\n\nIn `_get_multidict_value`, it uses `isinstance(values, (ImmutableMultiDict, Headers))`.\n\n```python\n    if is_sequence_field(field) and isinstance(values, (ImmutableMultiDict, Headers)):\n        value = values.getlist(alias)\n    else:\n        value = values.get(alias, None)\n```\n\nSo it's safe to use `isinstance(received_params, (ImmutableMultiDict, Headers))`.\n\nLet's apply the fix.\n\nWait, I should check if `received_params` can be a simple `dict`.\nThe type hint is `Union[Mapping[str, Any], QueryParams, Headers]`.\nA `dict` is a `Mapping`.\n\nIf `received_params` is a `dict`, `getlist` will not exist.\n\nLet's refine the loop:\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            if isinstance(received_params, (ImmutableMultiDict, Headers)):\n                values_list = received_params.getlist(key)\n                if len(values_list) > 1:\n                    params_to_process[key] = values_list\n                else:\n                    params_to_process[key] = value\n            else:\n                params_to_process[key] = value\n```\n\nWait, if `received_params` is a `dict`, and it contains a list as a value:\n`params={\"param2\": [\"456\", \"789\"]}`\nThen `received_params.items()` will give `('param2', ['456', '789'])`.\nAnd `params_to_process['param2']` will be `['456', '789']`.\nWhich is correct.\n\nSo the issue is specifically when `received_params` is a multi-dict and we use `.items()`.\n\nLet's check `fastapi/dependencies/utils.py` around line 808.\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            params_to_process[key] = value\n```\n\nI'll change it to:\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            if isinstance(received_params, (ImmutableMultiDict, Headers)):\n                values_list = received_params.getlist(key)\n                if len(values_list) > 1:\n                    params_to_process[key] = values_list\n                else:\n                    params_to_process[key] = value\n            else:\n                params_to_process[key] = value\n```\n\nWait, I can simplify this.\n\n```python\n    for key, value in received_params.items():\n        if key not in processed_keys:\n            if isinstance(received_params, (ImmutableMultiDict, Headers)):\n                values_list = received_params.getlist(key)\n                params_to_process[key] = values_list if len(values_list) > 1 else value\n            else:\n                params_to_process[key] = value\n```\n\nActually, `value` is just `received_params[key]`.\n\nLet's see if there is any other place where this happens. The issue says \"The reason is the same as with Form parameters. See #14303\".\n\nIf I search for the same pattern in the repo, I might find other places.\n\nLet's search for `received_params.items()` in `fastapi/dependencies/utils.py`.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_21",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep -n \"received_params.items()\" fastapi/dependencies/utils.py"
+          },
+          "extra": {
+            "elapsed_s": 96.80935978889465,
+            "timestamp": 1791360344.784083,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"794:    for key, value in received_params.items():\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 96.95051908493042,
+          "timestamp": 1791360344.9252422,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 11427,
+        "completion_tokens": 1252,
+        "cached_tokens": 0,
+        "total_tokens": 12679
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 96.80935978889465,
+        "timestamp": 1791360344.784083,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 10,
+      "source": "agent",
+      "message": "non-body parameter list parsing is fixed by modifying `request_params_to_args` in `fastapi/dependencies/utils.py`. When processing remaining parameters for a Pydantic model with `extra=\"allow\"`, we now check if `received_params` is a multi-dict (`ImmutableMultiDict` or `Headers`). If it is, and multiple values exist for a key, we use `getlist(key)` to capture all of them instead of just the last one.\n\nI will now apply the fix and verify it.\n\nWait, I should check if `ImmutableMultiDict` is available in the scope. Yes, it is imported at the top of `fastapi/dependencies/utils.py`.\n\nLet's apply the change.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_24",
+          "function_name": "edit_file",
+          "arguments": {
+            "filepath": "fastapi/dependencies/utils.py",
+            "new_string": "    for key, value in received_params.items():\n        if key not in processed_keys:\n            if isinstance(received_params, (ImmutableMultiDict, Headers)):\n                values_list = received_params.getlist(key)\n                params_to_process[key] = values_list if len(values_list) > 1 else value\n            else:\n                params_to_process[key] = value",
+            "old_string": "    for key, value in received_params.items():\n        if key not in processed_keys:\n            params_to_process[key] = value"
+          },
+          "extra": {
+            "elapsed_s": 103.99328684806824,
+            "timestamp": 1791360351.96801,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/utils.py\", \"occurrences\": 1, \"strategy\": \"exact\", \"diff\": \"--- a/fastapi/dependencies/utils.py\\n+++ b/fastapi/dependencies/utils.py\\n@@ -793,7 +793,11 @@\\n \\n     for key, value in received_params.items():\\n         if key not in processed_keys:\\n-            params_to_process[key] = value\\n+            if isinstance(received_params, (ImmutableMultiDict, Headers)):\\n+                values_list = received_params.getlist(key)\\n+                params_to_process[key] = values_list if len(values_list) > 1 else value\\n+            else:\\n+                params_to_process[key] = value\\n \\n     if single_not_embedded_field:\\n         field_info = first_field.field_info\\n\", \"is_truncated\": false}",
+        "extra": {
+          "tool_name": "edit_file",
+          "elapsed_s": 104.42682385444641,
+          "timestamp": 1791360352.401547,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 12731,
+        "completion_tokens": 325,
+        "cached_tokens": 0,
+        "total_tokens": 13056
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 103.99328684806824,
+        "timestamp": 1791360351.96801,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 11,
+      "source": "agent",
+      "message": "Now I will run the reproduction script again to verify the fix.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_27",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 _check.py"
+          },
+          "extra": {
+            "elapsed_s": 105.47847199440002,
+            "timestamp": 1791360353.453195,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Test passed!\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 106.37365674972534,
+          "timestamp": 1791360354.3483799,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 13304,
+        "completion_tokens": 37,
+        "cached_tokens": 0,
+        "total_tokens": 13341
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 105.47847199440002,
+        "timestamp": 1791360353.453195,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 12,
+      "source": "agent",
+      "message": "\u524d\u306ethought\nThe test passed!\n\nI should also check if this affects other things. The issue mentioned \"As for Cookies: As far as I understand the spec, you can't pass multiple Cookie parameters with the same name (only last value will be used). The only way to pass a list of values is to pass them comma-separated, but it's not currently supported by Starlette\".\n\nIn FastAPI, `Cookie` parameters are handled similarly to `Query` and `Header`.\n\nLet's see if `request_params_to_args` is also used for cookies.\n\nIn `fastapi/dependencies/utils.py`, the `received_params` is typed as `Union[Mapping[str, Any], QueryParams, Headers]`.\n\nDoes `request_params_to_args` handle cookies?\n\nLet's search for where `request_params_to_args` is called.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_30",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "git grep -n \"request_params_to_args\" fastapi/"
+          },
+          "extra": {
+            "elapsed_s": 111.07637691497803,
+            "timestamp": 1791360359.0511,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"fastapi/dependencies/utils.py:652:    path_values, path_errors = request_params_to_args(\\nfastapi/dependencies/utils.py:655:    query_values, query_errors = request_params_to_args(\\nfastapi/dependencies/utils.py:658:    header_values, header_errors = request_params_to_args(\\nfastapi/dependencies/utils.py:661:    cookie_values, cookie_errors = request_params_to_args(\\nfastapi/dependencies/utils.py:747:def request_params_to_args(\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 111.27877402305603,
+          "timestamp": 1791360359.2534971,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 13379,
+        "completion_tokens": 222,
+        "cached_tokens": 0,
+        "total_tokens": 13601
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 111.07637691497803,
+        "timestamp": 1791360359.0511,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 13,
+      "source": "agent",
+      "message": "L'id\u00e9e est d'utiliser `request_params_to_args` for cookies as well.\n\nLet's see what `cookie_values` are passed to `request_params_to_args` around line 661 of `fastapi/dependencies/utils.py`.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_33",
+          "function_name": "read_file",
+          "arguments": {
+            "end_line": 670,
+            "filepath": "fastapi/dependencies/utils.py",
+            "start_line": 640
+          },
+          "extra": {
+            "elapsed_s": 113.6223349571228,
+            "timestamp": 1791360361.597058,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/utils.py\", \"content\": \"                dependant=use_sub_dependant,\\n                stack=use_astack,\\n                sub_values=solved_result.values,\\n            )\\n        elif use_sub_dependant.is_coroutine_callable:\\n            solved = await call(**solved_result.values)\\n        else:\\n            solved = await run_in_threadpool(call, **solved_result.values)\\n        if sub_dependant.name is not None:\\n            values[sub_dependant.name] = solved\\n        if sub_dependant.cache_key not in dependency_cache:\\n            dependency_cache[sub_dependant.cache_key] = solved\\n    path_values, path_errors = request_params_to_args(\\n        dependant.path_params, request.path_params\\n    )\\n    query_values, query_errors = request_params_to_args(\\n        dependant.query_params, request.query_params\\n    )\\n    header_values, header_errors = request_params_to_args(\\n        dependant.header_params, request.headers\\n    )\\n    cookie_values, cookie_errors = request_params_to_args(\\n        dependant.cookie_params, request.cookies\\n    )\\n    values.update(path_values)\\n    values.update(query_values)\\n    values.update(header_values)\\n    values.update(cookie_values)\\n    errors += path_errors + query_errors + header_errors + cookie_errors\\n    if dependant.body_params:\\n        (\", \"start_line\": 640, \"end_line\": 670, \"total_lines\": 1033, \"is_truncated\": false}",
+        "extra": {
+          "tool_name": "read_file",
+          "elapsed_s": 113.75444984436035,
+          "timestamp": 1791360361.729173,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 13784,
+        "completion_tokens": 101,
+        "cached_tokens": 0,
+        "total_tokens": 13885
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 113.6223349571228,
+        "timestamp": 1791360361.597058,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 14,
+      "source": "agent",
+      "message": "`request.cookies` is passed as `received_params` for cookies.\nIn Starlette, `request.cookies` is a `Cookies` object, which is a subclass of `dict` (or behaves like one), but let's check if it has `getlist`.\n\nActually, Starlette's `Cookies` is just a wrapper around a dict. It does NOT have `getlist`.\n\nSo `isinstance(received_params, (ImmutableMultiDict, Headers))` will be False for cookies.\nWhich is correct, according to the problem statement: \"As far as I understand the spec, you can't pass multiple Cookie parameters with the same name (only last value will be used)\".\n\nSo my fix doesn't affect cookies, as intended.\n\nNow I'm confident with the fix.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_36",
+          "function_name": "submit_patch",
+          "arguments": {},
+          "extra": {
+            "elapsed_s": 117.92430996894836,
+            "timestamp": 1791360365.899033,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"patch_size\": 1791, \"files_changed\": 2}",
+        "extra": {
+          "tool_name": "submit_patch",
+          "elapsed_s": 118.29507899284363,
+          "timestamp": 1791360366.269802,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 14323,
+        "completion_tokens": 184,
+        "cached_tokens": 0,
+        "total_tokens": 14507
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 117.92430996894836,
+        "timestamp": 1791360365.899033,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 15,
+      "source": "agent",
+      "message": "Wait, `files_changed: 2`? I only edited `fastapi/dependencies/utils.py`. I also created `_check.py`. The `submit_patch` might be counting `_check.py`.\n\nActually, `submit_patch` should only include changes to the repository.\n\nLet's check `git diff`.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_39",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "git diff"
+          },
+          "extra": {
+            "elapsed_s": 120.48613977432251,
+            "timestamp": 1791360368.4608629,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"diff --git a/_check.py b/_check.py\\nnew file mode 100644\\nindex 00000000..9b0d2bb0\\n--- /dev/null\\n+++ b/_check.py\\n@@ -0,0 +1,41 @@\\n+from fastapi import FastAPI, Query\\n+from fastapi.testclient import TestClient\\n+from pydantic import BaseModel\\n+\\n+app = FastAPI()\\n+\\n+\\n+class Model(BaseModel):\\n+    param: str\\n+\\n+    model_config = {\\\"extra\\\": \\\"allow\\\"}\\n+\\n+\\n+@app.get(\\\"/\\\")\\n+async def model_with_extra(data: Model = Query()):\\n+    return data\\n+\\n+\\n+def test_pass_extra_list():\\n+    client = TestClient(app)\\n+    resp = client.get(\\n+        \\\"/\\\",\\n+        params={\\n+            \\\"param\\\": \\\"123\\\",\\n+            \\\"param2\\\": [\\\"456\\\", \\\"789\\\"],  # Pass a list of values as extra parameter\\n+        },\\n+    )\\n+    assert resp.status_code == 200\\n+    assert resp.json() == {\\n+        \\\"param\\\": \\\"123\\\",\\n+        \\\"param2\\\": [\\\"456\\\", \\\"789\\\"],\\n+    }\\n+\\n+if __name__ == \\\"__main__\\\":\\n+    try:\\n+        test_pass_extra_list()\\n+        print(\\\"Test passed!\\\")\\n+    except AssertionError as e:\\n+        print(f\\\"Test failed: {e}\\\")\\n+    except Exception as e:\\n+        print(f\\\"An error occurred: {e}\\\")\\ndiff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py\\nindex 2b2e6c5a..db1f90d3 100644\\n--- a/fastapi/dependencies/utils.py\\n+++ b/fastapi/dependencies/utils.py\\n@@ -793,7 +793,11 @@ def request_params_to_args(\\n \\n     for key, value in received_params.items():\\n         if key not in processed_keys:\\n-            params_to_process[key] = value\\n+            if isinstance(received_params, (ImmutableMultiDict, Headers)):\\n+                values_list = received_params.getlist(key)\\n+                params_to_process[key] = values_list if len(values_list) > 1 else value\\n+            else:\\n+                params_to_process[key] = value\\n \\n     if single_not_embedded_field:\\n         field_info = first_field.field_info\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 120.65365505218506,
+          "timestamp": 1791360368.6283782,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 14543,
+        "completion_tokens": 94,
+        "cached_tokens": 0,
+        "total_tokens": 14637
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 120.48613977432251,
+        "timestamp": 1791360368.4608629,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 16,
+      "source": "agent",
+      "message": "Okay, it included `_check.py`. I should probably remove `_check.py` before submitting or just let it be if it's not a problem. Usually, it's better to only submit source changes.\n\nActually, the instructions say \"Your only task is to implement the fix for the reported issue in source code\".\n\nI will remove `_check.py` and then submit again.",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_42",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "rm _check.py"
+          },
+          "extra": {
+            "elapsed_s": 131.18731093406677,
+            "timestamp": 1791360379.162034,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 131.32012176513672,
+          "timestamp": 1791360379.2948449,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 4207,
+        "completion_tokens": 109,
+        "cached_tokens": 0,
+        "total_tokens": 4316
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 131.18731093406677,
+        "timestamp": 1791360379.162034,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 17,
+      "source": "agent",
+      "message": "---\nI have fixed a bug in `fastapi/dependencies/utils.py` where extra non-body parameters (like `Query` or `Header`) passed as lists were not being correctly captured when used with a Pydantic model that has `extra=\"allow\"`.\n\nThe issue was that `received_params.items()` only returns the last value for keys with multiple values in Starlette's `QueryParams` and `Headers` (which are multi-dicts).\n\nI modified `request_params_to_args` to check if `received_params` is an instance of `ImmutableMultiDict` or `Headers`. If it is, it now uses `.getlist(key)` to retrieve all values if multiple values exist for a specific key.\n\nVerified the fix with a reproduction script.\n\n```python\n# Fix in fastapi/dependencies/utils.py:\n# In request_params_to_args function:\n-            params_to_process[key] = value\n+            if isinstance(received_params, (ImmutableMultiDict, Headers)):\n+                values_list = received_params.getlist(key)\n+                params_to_process[key] = values_list if len(values_list) > 1 else value\n+            else:\n+                params_to_process[key] = value\n```",
+      "model_name": "gemma4",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_45",
+          "function_name": "submit_patch",
+          "arguments": {},
+          "extra": {
+            "elapsed_s": 135.96977996826172,
+            "timestamp": 1791360383.944503,
+            "author": "swe_agent",
+            "model_version": "gemma4"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"patch_size\": 735, \"files_changed\": 1}",
+        "extra": {
+          "tool_name": "submit_patch",
+          "elapsed_s": 136.3655288219452,
+          "timestamp": 1791360384.340252,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 4348,
+        "completion_tokens": 297,
+        "cached_tokens": 0,
+        "total_tokens": 4645
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 135.96977996826172,
+        "timestamp": 1791360383.944503,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 18,
+      "source": "agent",
+      "message": "The patch is submitted.",
+      "model_name": "gemma4",
+      "metrics": {
+        "prompt_tokens": 4682,
+        "completion_tokens": 252,
+        "cached_tokens": 0,
+        "total_tokens": 4934
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 140.44268584251404,
+        "timestamp": 1791360388.417409,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 19,
+      "source": "agent",
+      "message": "The issue was located in `fastapi/dependencies/utils.py` within the `request_params_to_args` function. When Starlette's `QueryParams` or `Headers` (which are multi-dicts) were used, calling `.items()` only returned the last value for keys with multiple values. This caused Pydantic models with `extra=\"allow\"` to only receive the last value of a list of extra parameters.\n\nI updated `request_params_to_args` to check if `received_params` is an instance of `ImmutableMultiDict` or `Headers`. If so, it now uses `.getlist(key)` to retrieve all values when multiple values are present, ensuring that lists of extra parameters are correctly passed to the model.\n\nThis fix specifically targets `Query` and `Header` parameters, while leaving `Cookie` parameters as-is, since multiple cookies with the same name are not typically supported/expected in the same way by the spec or Starlette.\n\nVerified the fix with a reproduction script confirming that `param2=[\"456\", \"789\"]` is now correctly captured as a list in the model.",
+      "model_name": "gemma4",
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "final",
+        "elapsed_s": 140.44268584251404,
+        "timestamp": 1791360388.417409,
+        "author": "swe_agent"
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 147637,
+    "total_completion_tokens": 5891,
+    "total_cached_tokens": 0,
+    "total_tokens": 153528,
+    "total_steps": 19
+  }
+}

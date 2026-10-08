@@ -1,0 +1,97 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..92cccd07 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,30 +155,37 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(self, errors: Sequence[Any], *, endpoint_context: Optional[Dict[str, Any]] = None) -> None:
+         self._errors = errors
++        self.endpoint_context = endpoint_context
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self.endpoint_context:
++            ctx = self.endpoint_context
++            message += f"\n  File \"{ctx['file']}\", line {ctx['line']}, in {ctx['name']}\n"
++            message += f"    {ctx['method']} {ctx['path']}\n"
++        return message.rstrip()
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, endpoint_context: Optional[Dict[str, Any]] = None) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+         self.body = body
+ 
+ 
+ class WebSocketRequestValidationError(ValidationException):
+-    pass
++    def __init__(self, errors: Sequence[Any], *, endpoint_context: Optional[Dict[str, Any]] = None) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, endpoint_context: Optional[Dict[str, Any]] = None) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+         self.body = body
+ 
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..a3303fb1 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -286,6 +286,23 @@ async def run_endpoint_function(
+         return await run_in_threadpool(dependant.call, **values)
+ 
+ 
++def get_endpoint_context(endpoint: Callable[..., Any], path: str, methods: Set[str]) -> Optional[Dict[str, Any]]:
++    try:
++        source_file = inspect.getfile(endpoint)
++        lines, start_line = inspect.getsourcelines(endpoint)
++        func_name = endpoint.__name__
++        method = list(methods)[0] if methods else "UNKNOWN"
++        return {
++            "file": source_file,
++            "line": start_line,
++            "name": func_name,
++            "method": method,
++            "path": path,
++        }
++    except Exception:
++        return None
++
++
+ def get_request_handler(
+     dependant: Dependant,
+     body_field: Optional[ModelField] = None,
+@@ -300,6 +317,7 @@ def get_request_handler(
+     response_model_exclude_none: bool = False,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_context: Optional[Dict[str, Any]] = None,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
+     is_coroutine = dependant.is_coroutine_callable
+@@ -355,6 +373,7 @@ def get_request_handler(
+                     }
+                 ],
+                 body=e.doc,
++                endpoint_context=endpoint_context,
+             )
+             raise validation_error from e
+         except HTTPException:

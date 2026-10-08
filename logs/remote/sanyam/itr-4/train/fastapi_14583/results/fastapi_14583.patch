@@ -1,0 +1,188 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..0c9ecb2a
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,42 @@
++
++import warnings
++from fastapi.utils import create_model_field
++from fastapi._compat import may_v1
++
++def test_pydantic_v1_warning():
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        
++        # Trigger via annotation_is_pydantic_v1
++        from fastapi._compat.shared import annotation_is_pydantic_v1
++        from pydantic import BaseModel as PydanticBaseModel
++        
++        # In Pydantic v2, if we want a v1 model, we use pydantic.v1.BaseModel
++        # But we need to make sure may_v1.BaseModel is indeed Pydantic v1.
++        # Let's try creating a Pydantic v1 model using may_v1.BaseModel
++        class V1Model(may_v1.BaseModel):
++            x: int
++        
++        annotation_is_pydantic_v1(V1Model)
++        
++        # Check if DeprecationWarning was issued
++        v1_warnings = [warn for warn in w if issubclass(warn.category, DeprecationWarning) and "Pydantic v1 is deprecated" in str(warn.message)]
++        assert len(v1_warnings) > 0, "DeprecationWarning not issued for Pydantic v1 model"
++        
++        # Should only be issued once
++        create_model_field("field", int, version="1")
++        v1_warnings_after = [warn for warn in w if issubclass(warn.category, DeprecationWarning) and "Pydantic v1 is deprecated" in str(warn.message)]
++        assert len(v1_warnings_after) == 1, f"DeprecationWarning issued more than once: {len(v1_warnings_after)}"
++
++    print("Warning test passed!")
++
++    print("Warning test passed!")
++
++if __name__ == "__main__":
++    try:
++        test_pydantic_v1_warning()
++    except Exception as e:
++        print(f"Test failed: {e}")
++        import traceback
++        traceback.print_exc()
++        exit(1)
+diff --git a/_check_once.py b/_check_once.py
+new file mode 100644
+index 00000000..de6e29c7
+--- /dev/null
++++ b/_check_once.py
+@@ -0,0 +1,45 @@
++
++import warnings
++from fastapi import FastAPI
++from pydantic.v1 import BaseModel
++import pytest
++
++def test_pydantic_v1_warning_once():
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        
++        class ItemV1(BaseModel):
++            name: str
++            price: float
++
++        class OtherItemV1(BaseModel):
++            name: str
++
++        app = FastAPI()
++
++        @app.get("/1")
++        def read_item1(item: ItemV1):
++            return item
++
++        @app.get("/2")
++        def read_item2(item: OtherItemV1):
++            return item
++
++        v1_warnings = [
++            warn for warn in w 
++            if issubclass(warn.category, DeprecationWarning) and "Pydantic v1" in str(warn.message)
++        ]
++        
++        assert len(v1_warnings) == 1, f"Expected exactly 1 DeprecationWarning, got {len(v1_warnings)}"
++        print(f"Caught {len(v1_warnings)} warning(s)")
++
++if __name__ == "__main__":
++    try:
++        test_pydantic_v1_warning_once()
++        print("Check passed!")
++    except AssertionError as e:
++        print(f"Check failed: {e}")
++        exit(1)
++    except Exception as e:
++        print(f"An error occurred: {e}")
++        exit(1)
+diff --git a/fastapi/_compat/__init__.py b/fastapi/_compat/__init__.py
+index fd1df8c6..df2c3365 100644
+--- a/fastapi/_compat/__init__.py
++++ b/fastapi/_compat/__init__.py
+@@ -36,8 +36,11 @@ from .may_v1 import _normalize_errors as _normalize_errors
+ from .model_field import ModelField as ModelField
+ from .shared import PYDANTIC_V2 as PYDANTIC_V2
+ from .shared import PYDANTIC_VERSION_MINOR_TUPLE as PYDANTIC_VERSION_MINOR_TUPLE
+-from .shared import annotation_is_pydantic_v1 as annotation_is_pydantic_v1
+-from .shared import field_annotation_is_scalar as field_annotation_is_scalar
++from .shared import (
++    _warn_pydantic_v1_deprecated,
++    annotation_is_pydantic_v1,
++    field_annotation_is_scalar,
++)
+ from .shared import (
+     is_uploadfile_or_nonable_uploadfile_annotation as is_uploadfile_or_nonable_uploadfile_annotation,
+ )
+diff --git a/fastapi/_compat/shared.py b/fastapi/_compat/shared.py
+index 3a11e88a..1838fe4a 100644
+--- a/fastapi/_compat/shared.py
++++ b/fastapi/_compat/shared.py
+@@ -4,6 +4,7 @@ import typing
+ from collections import deque
+ from collections.abc import Mapping, Sequence
+ from dataclasses import is_dataclass
++import warnings
+ from typing import (
+     Annotated,
+     Any,
+@@ -30,8 +31,11 @@ else:
+ PYDANTIC_VERSION_MINOR_TUPLE = tuple(int(x) for x in PYDANTIC_VERSION.split(".")[:2])
+ PYDANTIC_V2 = PYDANTIC_VERSION_MINOR_TUPLE[0] == 2
+ 
++_pydantic_v1_warned = False
++
+ 
+ sequence_annotation_to_type = {
++
+     Sequence: list,
+     list: list,
+     tuple: tuple,
+@@ -179,13 +183,26 @@ def is_uploadfile_sequence_annotation(annotation: Any) -> bool:
+     )
+ 
+ 
++def _warn_pydantic_v1_deprecated() -> None:
++    global _pydantic_v1_warned
++    if not _pydantic_v1_warned and PYDANTIC_V2:
++        warnings.warn(
++            "Pydantic v1 is deprecated. Please migrate to Pydantic v2 for better performance and features.",
++            DeprecationWarning,
++            stacklevel=4,
++        )
++        _pydantic_v1_warned = True
++
++
+ def annotation_is_pydantic_v1(annotation: Any) -> bool:
+     if lenient_issubclass(annotation, may_v1.BaseModel):
++        _warn_pydantic_v1_deprecated()
+         return True
+     origin = get_origin(annotation)
+     if origin is Union or origin is UnionType:
+         for arg in get_args(annotation):
+             if lenient_issubclass(arg, may_v1.BaseModel):
++                _warn_pydantic_v1_deprecated()
+                 return True
+     if field_annotation_is_sequence(annotation):
+         for sub_annotation in get_args(annotation):
+diff --git a/fastapi/utils.py b/fastapi/utils.py
+index c4631d7e..89889b5e 100644
+--- a/fastapi/utils.py
++++ b/fastapi/utils.py
+@@ -18,6 +18,7 @@ from fastapi._compat import (
+     Undefined,
+     UndefinedType,
+     Validator,
++    _warn_pydantic_v1_deprecated,
+     annotation_is_pydantic_v1,
+     lenient_issubclass,
+     may_v1,
+@@ -102,6 +103,7 @@ def create_model_field(
+         or isinstance(field_info, may_v1.FieldInfo)
+         or version == "1"
+     ):
++        _warn_pydantic_v1_deprecated()
+         from fastapi._compat import v1
+ 
+         try:

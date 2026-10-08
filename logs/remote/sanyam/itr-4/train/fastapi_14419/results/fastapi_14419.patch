@@ -1,0 +1,135 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..95c76771
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,72 @@
++
++from fastapi.dependencies.utils import get_dependant
++from fastapi.params import Security as ParamsSecurity
++from fastapi.dependencies.models import Dependant
++from typing import Any
++from fastapi.security.base import SecurityBase
++from fastapi.security import OAuth2PasswordBearer
++
++# Mock SecurityScopes for signature detection
++class SecurityScopes:
++    pass
++
++def dep_no_scopes():
++    return "no-scopes"
++
++def dep_uses_scopes(scopes: SecurityScopes):
++    return "uses-scopes"
++
++def test_cache_key():
++    # 1. Dependency that doesn't use scopes
++    d1 = get_dependant(path="d1", call=dep_no_scopes, security_scopes=None)
++    d2 = get_dependant(path="d1", call=dep_no_scopes, security_scopes=["read"])
++    
++    print(f"No scopes - d1 key: {d1.cache_key}")
++    print(f"No scopes - d2 key: {d2.cache_key}")
++    
++    # These should be equal because dep_no_scopes doesn't use scopes
++    assert d1.cache_key == d2.cache_key, "Dependencies not using scopes should have the same cache key regardless of parent scopes"
++
++    # 2. Dependency that uses scopes via SecurityScopes param
++    d3 = get_dependant(path="d3", call=dep_uses_scopes, security_scopes=None)
++    d4 = get_dependant(path="d3", call=dep_uses_scopes, security_scopes=["read"])
++    
++    print(f"Uses scopes - d3 key: {d3.cache_key}")
++    print(f"Uses scopes - d4 key: {d4.cache_key}")
++    
++    # These should be different
++    assert d3.cache_key != d4.cache_key, "Dependencies using scopes should have different cache keys for different scopes"
++
++    # 3. Dependency that doesn't use scopes, but depends on one that does
++    def dep_parent_no_scopes(sub=get_dependant(path="sub", call=dep_uses_scopes)):
++        pass
++    # This is not how get_dependant is usually called. Let's use a real dependency.
++    
++    from fastapi.params import Depends as ParamsDepends
++    def dep_sub_uses_scopes(scopes: SecurityScopes):
++        return "sub-uses"
++    
++    def dep_top_no_scopes(sub=ParamsDepends(dep_sub_uses_scopes)):
++        return "top"
++    
++    dt1 = get_dependant(path="top", call=dep_top_no_scopes, security_scopes=None)
++    dt2 = get_dependant(path="top", call=dep_top_no_scopes, security_scopes=["read"])
++    
++    print(f"Top depends on scopes - dt1 key: {dt1.cache_key}")
++    print(f"Top depends on scopes - dt2 key: {dt2.cache_key}")
++    
++    # These should be different because a sub-dependency uses scopes
++    assert dt1.cache_key != dt2.cache_key, "Dependencies with sub-dependencies using scopes should have different cache keys"
++
++if __name__ == "__main__":
++    try:
++        test_cache_key()
++        print("All tests passed!")
++    except AssertionError as e:
++        print(f"Test failed: {e}")
++        exit(1)
++    except Exception as e:
++        print(f"An error occurred: {e}")
++        import traceback
++        traceback.print_exc()
++        exit(1)
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index d6359c0f..4ed62a2b 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -39,15 +39,31 @@ class Dependant:
+     background_tasks_param_name: Optional[str] = None
+     security_scopes_param_name: Optional[str] = None
+     security_scopes: Optional[List[str]] = None
++    declared_scopes: Optional[List[str]] = None
+     use_cache: bool = True
+     path: Optional[str] = None
+     scope: Union[Literal["function", "request"], None] = None
+ 
++    @cached_property
++    def uses_scopes(self) -> bool:
++        if self.security_scopes_param_name is not None:
++            return True
++        if self.declared_scopes:
++            return True
++        for dep in self.dependencies:
++            if dep.uses_scopes:
++                return True
++        return False
++
+     @cached_property
+     def cache_key(self) -> DependencyCacheKey:
++        if self.uses_scopes:
++            scopes = tuple(sorted(set(self.security_scopes or [])))
++        else:
++            scopes = ()
+         return (
+             self.call,
+-            tuple(sorted(set(self.security_scopes or []))),
++            scopes,
+             self.computed_scope or "",
+         )
+ 
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 45353835..9fc8d1f7 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -233,6 +233,7 @@ def get_dependant(
+     call: Callable[..., Any],
+     name: Optional[str] = None,
+     security_scopes: Optional[List[str]] = None,
++    declared_scopes: Optional[List[str]] = None,
+     use_cache: bool = True,
+     scope: Union[Literal["function", "request"], None] = None,
+ ) -> Dependant:
+@@ -241,6 +242,7 @@ def get_dependant(
+         name=name,
+         path=path,
+         security_scopes=security_scopes,
++        declared_scopes=declared_scopes,
+         use_cache=use_cache,
+         scope=scope,
+     )
