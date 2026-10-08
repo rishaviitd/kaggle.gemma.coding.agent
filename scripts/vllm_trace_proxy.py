@@ -62,10 +62,8 @@ class VllmTraceProxy:
                 if self.path.rstrip('/').endswith('/chat/completions'):
                     with proxy._lock:
                         proxy.exchanges.append({
-                            'request_raw_json': request_body.decode('utf-8', errors='replace'),
                             'request': _decode_json(request_body),
                             'response_status': status,
-                            'response_raw_json': response_body.decode('utf-8', errors='replace'),
                             'response': _decode_json(response_body),
                         })
 
@@ -92,8 +90,11 @@ class VllmTraceProxy:
             self._thread.join(timeout=5)
 
     def write_trace(self, path: Path, *, run: dict[str, Any], final: dict[str, Any]) -> None:
+        shared_request = _shared_request(self.exchanges)
         turns = []
+        previous_messages: list[dict[str, Any]] | None = None
         for index, exchange in enumerate(self.exchanges, start=1):
+            request = exchange['request'] if isinstance(exchange['request'], dict) else {}
             response = exchange['response'] if isinstance(exchange['response'], dict) else {}
             message = ((response.get('choices') or [{}])[0].get('message') or {})
             tool_calls = _normalize_tool_calls(message.get('tool_calls', []))
@@ -104,18 +105,28 @@ class VllmTraceProxy:
             )
             turns.append({
                 'turn': index,
-                'input': {'vllm_request': exchange['request'], 'raw_json': exchange['request_raw_json']},
+                'input': _compact_request(request, shared_request, previous_messages),
                 'output': {
-                    'vllm_response_raw': exchange['response'],
-                    'raw_json': exchange['response_raw_json'],
+                    'response_status': exchange['response_status'],
                     'assistant_content': message.get('content'),
                     'reasoning': message.get('reasoning') or message.get('reasoning_content'),
                     'tool_calls': tool_calls,
                 },
                 'tool_results': _tool_results(next_request, tool_calls),
             })
+            previous_messages = _request_messages_without_shared_prefix(request, shared_request)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({'schema_version': 'vllm-model-trace-v1', 'run': run, 'turns': turns, 'final': final}, indent=2) + '\n')
+        trace = {
+            'schema_version': 'vllm-model-trace-v3',
+            'run': run,
+            'shared_request': shared_request,
+            'turns': turns,
+            'final': final,
+        }
+        path.write_text(json.dumps(trace, indent=2) + '\n')
+        from build_agent_trace import agent_trace
+        path.with_name('agent_trace.json').write_text(
+            json.dumps(agent_trace(trace), indent=2) + '\n')
 
 
 def _decode_json(body: bytes) -> Any:
@@ -123,6 +134,49 @@ def _decode_json(body: bytes) -> Any:
         return json.loads(body)
     except json.JSONDecodeError:
         return None
+
+
+def _shared_request(exchanges: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return stable request context duplicated on every model turn."""
+    if not exchanges or not isinstance(exchanges[0]['request'], dict):
+        return {}
+    first = exchanges[0]['request']
+    prefix = []
+    for message in first.get('messages', []):
+        if message.get('role') not in {'system', 'user'}:
+            break
+        prefix.append(message)
+    return {'message_prefix': prefix, 'tools': first.get('tools')}
+
+
+def _request_messages_without_shared_prefix(
+    request: dict[str, Any], shared: dict[str, Any]
+) -> list[dict[str, Any]]:
+    messages = list(request.get('messages', []))
+    prefix = shared.get('message_prefix', [])
+    return messages[len(prefix):] if prefix and messages[:len(prefix)] == prefix else messages
+
+
+def _compact_request(
+    request: dict[str, Any], shared: dict[str, Any], previous_messages: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Store only new history, with a snapshot when request context changes."""
+    compact = dict(request)
+    messages = _request_messages_without_shared_prefix(request, shared)
+    prefix = shared.get('message_prefix', [])
+    has_shared_prefix = prefix and list(request.get('messages', []))[:len(prefix)] == prefix
+    compact.pop('messages', None)
+    if has_shared_prefix:
+        compact['uses_shared_message_prefix'] = True
+    if shared.get('tools') is not None and request.get('tools') == shared['tools']:
+        compact.pop('tools', None)
+        compact['uses_shared_tools'] = True
+    if previous_messages is not None and messages[:len(previous_messages)] == previous_messages:
+        # The new assistant and tool messages are already this turn's output and tool_results.
+        history = {'mode': 'delta'}
+    else:
+        history = {'mode': 'snapshot', 'items': messages}
+    return {'vllm_request': compact, 'message_history': history}
 
 
 def _normalize_tool_calls(calls: Any) -> list[dict[str, Any]]:

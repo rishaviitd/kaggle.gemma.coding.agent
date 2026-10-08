@@ -283,7 +283,8 @@ async def run_one(args, working, agent_dir, key, task, index, total):
         return summary
     finally:
         proxy.stop()
-        final = {'result': result.model_dump(mode='json', exclude={'trace'}) if 'result' in locals() else None}
+        final = {'result': result.model_dump(
+            mode='json', exclude={'trace', 'test_output'}) if 'result' in locals() else None}
         proxy.write_trace(
             task_logs / 'model_trace.json',
             run={'task_id': task.instance_id, 'upstream_api_base': args.api_base},

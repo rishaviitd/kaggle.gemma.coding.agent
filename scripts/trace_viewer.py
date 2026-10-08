@@ -41,6 +41,35 @@ function formattedInput(req){
  const tools=(req?.tools||[]).map(t=>{const f=t.function||t; return `- ${f.name}: ${f.description||''}\\n  parameters: ${JSON.stringify(f.parameters||{})}`}).join('\\n');
  return `================ SYSTEM PROMPT ================\\n${show(system)}\\n\\n================ USER PROMPT ================\\n${show(user)}\\n\\n================ PRIOR ASSISTANT OUTPUTS AND TOOL RESPONSES ================\\n${show(history)}\\n\\n================ AVAILABLE TOOL DEFINITIONS ================\\n${tools}`;
 }
+function messagesFromTurn(turn){
+ if(!turn) return [];
+ const output=turn.output||{};
+ const calls=(output.tool_calls||[]).map(call=>({function:{name:call.name||'',arguments:call.arguments_raw_json||JSON.stringify(call.arguments||{})}}));
+ const assistant={role:'assistant',content:output.assistant_content||'',reasoning_content:output.reasoning||'',tool_calls:calls};
+ const tools=(turn.tool_results||[]).map(result=>({role:'tool_responses',content:typeof result.output_raw_json==='string'?result.output_raw_json:JSON.stringify(result.output??'')}));
+ return [assistant,...tools];
+}
+function expandedRequest(input, shared, previousMessages, previousTurn){
+ const req={...(input?.vllm_request||{})};
+ const history=input?.message_history;
+ let body;
+ if(history?.mode==='delta'){
+  const items=history.items?.length?history.items:messagesFromTurn(previousTurn);
+  body=[...(previousMessages||[]),...items];
+ }
+ else if(history?.mode==='snapshot') body=[...(history.items||[])];
+ else body=[...(req.messages||[])];
+ delete req.messages;
+ if(req.uses_shared_message_prefix){
+  req.messages=[...(shared?.message_prefix||[]),...body];
+  delete req.uses_shared_message_prefix;
+ } else req.messages=body;
+ if(req.uses_shared_tools){
+  req.tools=shared?.tools||[];
+  delete req.uses_shared_tools;
+ }
+ return {request:req, messages:body};
+}
 function formattedOutput(o){
  let s=[];
  if(o?.reasoning) s.push('REASONING\\n'+o.reasoning);
@@ -58,10 +87,15 @@ function block(label, cls, formatted, value){return `<h3>${label}</h3><button da
 fetch('/trace.json').then(r=>r.json()).then(t=>{
  document.querySelector('#title').textContent=`${t.run?.task_id||'trace'} — ${t.turns.length} model turns`;
  const root=document.querySelector('#steps');
+ let previousMessages=[];
+ let previousTurn=null;
  for(const x of t.turns){
+  const expanded=expandedRequest(x.input,t.shared_request,previousMessages,previousTurn);
+  previousMessages=expanded.messages;
+  previousTurn=x;
   const d=document.createElement('details'); d.open=true;
   d.innerHTML=`<summary>Turn ${x.turn}: ${x.output?.tool_calls?.[0]?.name||'assistant response'}</summary>`+
-   block('Input sent to vLLM','input',formattedInput(x.input?.vllm_request),x.input?.vllm_request)+
+   block('Input sent to vLLM','input',formattedInput(expanded.request),expanded.request)+
    block('Output from vLLM','output',formattedOutput(x.output),x.output)+
    block('Tool result(s) sent in next input','tool',formattedTools(x.tool_results),x.tool_results);
   d.querySelectorAll('button').forEach(b=>b.onclick=()=>{const h=b.parentElement; h.querySelectorAll('pre').forEach(p=>p.hidden=p.classList.contains('raw') !== (b.dataset.mode==='raw'));});
