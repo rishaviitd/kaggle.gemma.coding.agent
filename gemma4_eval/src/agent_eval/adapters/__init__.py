@@ -1,0 +1,1 @@
+"""Versionable structured trace adapters."""
