@@ -12,6 +12,7 @@
 | S13 | `eval_config.yaml`, `prompts/system.md` | `max_time_minutes` stays 5; prompt budget says 40 calls and 5 minutes. | Matches the hard limits. The itr-2 prompt and config already said 40; only the itr-2 `changes.md` (S7) says 28. |
 | S14 | `prompts/system.md` (section 2) | Two bullets from itr-4: "Copy, never invent" (S10, verbatim quoted strings, else match nearest existing message) and "Cover sibling paths" (S11, generic part only, no `docs_src` text). | 9 of 24 reviewed itr-2 failures each were invented strings and partial fixes. |
 | S15 | `prompts/system.md` (section 4), `review.py` | Before `submit_patch`, `git status --short`, remove scratch files, never touch `pytest.ini`/`conftest.py` (itr-4 S14). `review.py` also reports `STRAY` (untracked files) and `CONFIG` (edited `pytest.ini`, `conftest.py`, `setup.cfg`, `tox.ini`) as FIX BEFORE SUBMIT. | Keeps stray files out of the patch. Not repo-specific. |
+| S16 | `prompts/system.md` (helper section, section 4) | `review.py` is mandatory before `submit_patch`; a `FIX BEFORE SUBMIT` verdict must be fixed and the script rerun; `unknown` test labels count as NEW; `review.py` does not replace the agent's own issue-specific check. | Make the model act on the helper output without treating it as proof of correctness. |
 
 `configs/sampling.yaml` is unchanged from itr-2.
 

@@ -5,7 +5,10 @@ Aim to understand, resolve, and verify the fix in as few tool calls as possible.
 
 ## Helper scripts (skill `swe-helpers`, each costs 1 tool call)
 - FIRST action, before reading anything: call `run_skill_script` with skill `swe-helpers`, script `scripts/locate.py`, args `{"issue": "<the full issue text, verbatim>"}`. It ranks likely files and line ranges; start from those. If it says `confidence: low`, treat it only as a hint and search yourself.
-- After your last source edit and before `submit_patch`: call `run_skill_script` once with `scripts/review.py` (args `{}`). It checks the diff and runs related tests. Fix anything it flags as FIX BEFORE SUBMIT, but ignore failures it labels PRE-EXISTING.
+- After your last source edit and before `submit_patch`: call `run_skill_script` with `scripts/review.py` (args `{}`). This is mandatory; never call `submit_patch` before you have read its output. It checks the diff and runs related tests.
+  - If its last line is `VERDICT: FIX BEFORE SUBMIT`, you must fix every item it lists (EMPTY, SYNTAX, NO-SOURCE, UNDEFINED, STRAY, CONFIG, and any test marked NEW), then call `review.py` once more. Do not submit while it still says FIX BEFORE SUBMIT, unless the only remaining items are marked PRE-EXISTING.
+  - Ignore only failures it labels PRE-EXISTING. A failure marked `unknown` counts as NEW.
+  - `review.py` does not replace your own check from section 3. Its "no blocking problems" verdict does not mean the fix is right; it never sees the issue. You still must run your own check against the issue's exact behavior and have it pass.
 
 ## Workflow
 
@@ -47,7 +50,7 @@ Aim to understand, resolve, and verify the fix in as few tool calls as possible.
 - If you need to locate the test file, find it explicitly with `find tests -name "*<name>*.py"` instead of running the test runner across the repo.
 
 ### 4. Immediate Patch Submission
-- Once your check and targeted test pass:
+- Once your own check and targeted test pass, and `review.py` has no FIX BEFORE SUBMIT left:
   1. Run `git status --short`; `rm` any scratch file you created in `/workspace` and never touch `pytest.ini` or `conftest.py`.
   2. Call `submit_patch`. Verify `patch_size > 0` and `files_changed > 0`.
   3. Output a short summary of the fix to end the session.
