@@ -41,7 +41,16 @@ def agent_trace(model_trace: dict) -> dict:
                 'name': item.get('name'),
                 'output': item.get('output') if item.get('output') is not None else item.get('output_raw_json'),
             })
-        entry = {'turn': turn.get('turn')}
+        entry = {'turn': turn.get('turn'), 'caller': turn.get('caller') or 'main'}
+        if entry['caller'] != 'main':
+            history = (turn.get('input') or {}).get('message_history') or {}
+            items = history.get('items') or []
+            sub_system = next((_text(m) for m in items if m.get('role') == 'system'), '')
+            sub_task = next((_text(m) for m in items if m.get('role') == 'user'), '')
+            if sub_system:
+                entry['system'] = sub_system
+            if sub_task:
+                entry['task'] = sub_task
         if output.get('reasoning'):
             entry['reasoning'] = output['reasoning']
         if output.get('assistant_content'):

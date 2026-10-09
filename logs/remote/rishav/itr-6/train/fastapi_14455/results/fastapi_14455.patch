@@ -1,0 +1,139 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..44297707
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,31 @@
++from fastapi import FastAPI, Depends, Security
++from fastapi.security import OAuth2PasswordBearer
++
++app = FastAPI()
++
++oauth2_scheme_user = OAuth2PasswordBearer(
++    tokenUrl="token", 
++    scopes={"user": "User access"}
++)
++oauth2_scheme_admin = OAuth2PasswordBearer(
++    tokenUrl="token", 
++    scopes={"admin": "Admin access"}
++)
++
++def get_current_user_admin(token: str = Security(oauth2_scheme_admin)):
++    return {"user": "admin", "token": token}
++
++def get_current_user_user(token: str = Security(oauth2_scheme_user)):
++    return {"user": "user", "token": token}
++
++@app.get("/user")
++async def read_user(user = Depends(get_current_user_user)):
++    return user
++
++@app.get("/admin")
++async def read_admin(user = Depends(get_current_user_admin)):
++    return user
++
++openapi_schema = app.openapi()
++security_schemes = openapi_schema.get("components", {}).get("securitySchemes", {})
++print(f"Security Schemes: {security_schemes}")
+diff --git a/fastapi/openapi/utils.py b/fastapi/openapi/utils.py
+index dbc93d28..ad883db7 100644
+--- a/fastapi/openapi/utils.py
++++ b/fastapi/openapi/utils.py
+@@ -75,19 +75,64 @@ status_code_ranges: Dict[str, str] = {
+ }
+ 
+ 
++def merge_security_schemes(existing: Dict[str, Any], new: Dict[str, Any]) -> None:
++    for name, definition in new.items():
++        if name not in existing:
++            existing[name] = definition
++        else:
++            existing_definition = existing[name]
++            if "flows" in definition:
++                existing_flows = existing_definition.setdefault("flows", {})
++                for flow_name, flow_data in definition["flows"].items():
++                    if flow_name in existing_flows:
++                        existing_scopes = existing_flows[flow_name].setdefault("scopes", {})
++                        existing_scopes.update(flow_data.get("scopes", {}))
++                    else:
++                        existing_flows[flow_name] = flow_data
++
++            for key, value in definition.items():
++                if key != "flows":
++                    existing_definition[key] = value
++
++
+ def get_openapi_security_definitions(
+     flat_dependant: Dependant,
+ ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+     security_definitions = {}
+     operation_security = []
+     for security_requirement in flat_dependant.security_requirements:
++        security_name = security_requirement.security_scheme.scheme_name
+         security_definition = jsonable_encoder(
+             security_requirement.security_scheme.model,
+             by_alias=True,
+             exclude_none=True,
+         )
+-        security_name = security_requirement.security_scheme.scheme_name
+-        security_definitions[security_name] = security_definition
++
++        if security_name not in security_definitions:
++            security_definitions[security_name] = security_definition
++        else:
++            existing_definition = security_definitions[security_name]
++            if "flows" in security_definition:
++                existing_flows = existing_definition.setdefault("flows", {})
++                for flow_name, flow_data in security_definition["flows"].items():
++                    if flow_name in existing_flows:
++                        existing_scopes = existing_flows[flow_name].setdefault("scopes", {})
++                        existing_scopes.update(flow_data.get("scopes", {}))
++                    else:
++                        existing_flows[flow_name] = flow_data
++
++            for key, value in security_definition.items():
++                if key != "flows":
++                    existing_definition[key] = value
++
++        definition = security_definitions[security_name]
++        if "flows" in definition:
++            for flow_data in definition["flows"].values():
++                scopes = flow_data.setdefault("scopes", {})
++                for scope in security_requirement.scopes:
++                    if scope not in scopes:
++                        scopes[scope] = ""
++
+         operation_security.append({security_name: security_requirement.scopes})
+     return security_definitions, operation_security
+ 
+@@ -280,7 +325,7 @@ def get_openapi_path(
+             if operation_security:
+                 operation.setdefault("security", []).extend(operation_security)
+             if security_definitions:
+-                security_schemes.update(security_definitions)
++                merge_security_schemes(security_schemes, security_definitions)
+             operation_parameters = _get_openapi_operation_parameters(
+                 dependant=route.dependant,
+                 model_name_map=model_name_map,
+@@ -520,8 +565,8 @@ def get_openapi(
+                 if path:
+                     paths.setdefault(route.path_format, {}).update(path)
+                 if security_schemes:
+-                    components.setdefault("securitySchemes", {}).update(
+-                        security_schemes
++                    merge_security_schemes(
++                        components.setdefault("securitySchemes", {}), security_schemes
+                     )
+                 if path_definitions:
+                     definitions.update(path_definitions)
+@@ -539,8 +584,8 @@ def get_openapi(
+                 if path:
+                     webhook_paths.setdefault(webhook.path_format, {}).update(path)
+                 if security_schemes:
+-                    components.setdefault("securitySchemes", {}).update(
+-                        security_schemes
++                    merge_security_schemes(
++                        components.setdefault("securitySchemes", {}), security_schemes
+                     )
+                 if path_definitions:
+                     definitions.update(path_definitions)

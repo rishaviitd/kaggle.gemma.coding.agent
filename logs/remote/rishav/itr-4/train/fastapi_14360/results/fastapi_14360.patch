@@ -1,0 +1,119 @@
+diff --git a/_check.py b/_check.py
+new file mode 100644
+index 00000000..3808d8fc
+--- /dev/null
++++ b/_check.py
+@@ -0,0 +1,63 @@
++from fastapi import FastAPI, Query
++from pydantic import BaseModel, Field
++from fastapi.testclient import TestClient
++
++app = FastAPI()
++
++class QueryModel(BaseModel):
++    q_alias: str = Field(alias="q")
++
++@app.get("/")
++async def read_query(params: QueryModel = Query()):
++    return params
++
++client = TestClient(app)
++
++def test_alias_extraction():
++    print("\nRunning test_alias_extraction...")
++    # Case 1: Value extracted by alias, but put into values with field.name
++    # If I pass ?q=foo, it should work.
++    response = client.get("/?q=foo")
++    print(f"Response status: {response.status_code}")
++    print(f"Response body: {response.json()}")
++    assert response.status_code == 200, f"Expected 200, got {response.status_code}. Body: {response.json()}"
++    assert response.json() == {"q_alias": "foo"}, f"Expected {{'q_alias': 'foo'}}, got {response.json()}"
++
++def test_name_extraction_error():
++    print("\nRunning test_name_extraction_error...")
++    # Case 2: Pass value by name, should get validation error, and input should contain it.
++    # If I pass ?q_alias=foo, it should fail (because alias is 'q').
++    response = client.get("/?q_alias=foo")
++    print(f"Response status: {response.status_code}")
++    print(f"Response body: {response.json()}")
++    assert response.status_code == 422, f"Expected 422, got {response.status_code}"
++    
++    errors = response.json()["detail"]
++    # The issue says: "the `input` field will not contain the extra parameter (passed by name)"
++    # because `field.name` was mistakenly added to `processed_keys`.
++    # We expect 'q_alias' to be in the input of the error.
++    
++    found_q_alias = False
++    for error in errors:
++        if "input" in error and error["input"] == "foo":
++            found_q_alias = True
++            break
++        # Also check if it's a dict
++        if "input" in error and isinstance(error["input"], dict) and "q_alias" in error["input"]:
++            found_q_alias = True
++            break
++            
++    assert found_q_alias, f"Expected 'q_alias' to be in the error input, but it wasn't. Errors: {errors}"
++
++if __name__ == "__main__":
++    try:
++        test_alias_extraction()
++        print("test_alias_extraction passed")
++    except Exception as e:
++        print(f"test_alias_extraction failed: {e}")
++
++    try:
++        test_name_extraction_error()
++        print("test_name_extraction_error passed")
++    except Exception as e:
++        print(f"test_name_extraction_error failed: {e}")
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 20cb2c88..ef3f5641 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -787,9 +787,8 @@ def request_params_to_args(
+                 )
+         value = _get_multidict_value(field, received_params, alias=alias)
+         if value is not None:
+-            params_to_process[field.name] = value
++            params_to_process[field.alias] = value
+         processed_keys.add(alias or field.alias)
+-        processed_keys.add(field.name)
+ 
+     for key in received_params.keys():
+         if key not in processed_keys:
+diff --git a/test_alias.py b/test_alias.py
+new file mode 100644
+index 00000000..7ff62f3a
+--- /dev/null
++++ b/test_alias.py
+@@ -0,0 +1,8 @@
++from pydantic import BaseModel, Field
++class M(BaseModel):
++    a: str
++print(f"Default alias: {M.__fields__['a'].alias}")
++
++class M2(BaseModel):
++    a: str = Field(alias="b")
++print(f"Custom alias: {M2.__fields__['a'].alias}")
+diff --git a/test_get_multidict_value.py b/test_get_multidict_value.py
+new file mode 100644
+index 00000000..24496dc7
+--- /dev/null
++++ b/test_get_multidict_value.py
+@@ -0,0 +1,15 @@
++from pydantic import BaseModel
++from fastapi.dependencies.utils import _get_multidict_value
++from fastapi._compat import ModelField
++from typing import Mapping, Any
++
++class MockField:
++    def __init__(self, name, alias):
++        self.name = name
++        self.alias = alias
++        self.required = True
++        self.field_info = None
++
++values = {"q": "foo"}
++field = MockField("q", None)
++print(f"Value for alias=None: {_get_multidict_value(field, values)}")

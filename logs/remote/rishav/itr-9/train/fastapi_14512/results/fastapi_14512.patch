@@ -1,0 +1,150 @@
+diff --git a/pydantic_test.py b/pydantic_test.py
+new file mode 100644
+index 00000000..28a85801
+--- /dev/null
++++ b/pydantic_test.py
+@@ -0,0 +1,26 @@
++from typing import Literal, Union, Annotated
++from pydantic import BaseModel, Field, TypeAdapter, ValidationError
++
++class Cat(BaseModel):
++    meow: bool
++    kind: Literal["cat"]
++
++class Dog(BaseModel):
++    bark: bool
++    kind: Literal["dog"]
++
++CatDog = Annotated[Union[Cat, Dog], Field(discriminator="kind")]
++
++adapter = TypeAdapter(CatDog)
++
++try:
++    print("Testing valid cat...")
++    print(adapter.validate_python({"kind": "cat", "meow": True}))
++    
++    print("\nTesting valid dog...")
++    print(adapter.validate_python({"kind": "dog", "bark": True}))
++    
++    print("\nTesting invalid discriminator...")
++    print(adapter.validate_python({"kind": "bird", "fly": True}))
++except ValidationError as e:
++    print(e.json())
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 00000000..e8601e8b
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,58 @@
++from fastapi import FastAPI, Body
++from fastapi.testclient import TestClient
++from typing import Literal, Union, Annotated
++from pydantic import BaseModel, Field
++
++class Cat(BaseModel):
++    meow: bool
++    kind: Literal["cat"]
++
++class Dog(BaseModel):
++    bark: bool
++    kind: Literal["dog"]
++
++CatDog = Annotated[Union[Cat, Dog], Field(discriminator="kind")]
++
++app = FastAPI()
++
++@app.post("/pet")
++async def create_pet(pet: Annotated[CatDog, Body()]):
++    return pet
++
++client = TestClient(app)
++
++def test_tagged_union_body():
++    # Test cat
++    response = client.post("/pet", json={"kind": "cat", "meow": True})
++    print(f"Cat response: {response.status_code} {response.json()}")
++    assert response.status_code == 200
++    assert response.json() == {"kind": "cat", "meow": True}
++
++    # Test dog
++    response = client.post("/pet", json={"kind": "dog", "bark": True})
++    print(f"Dog response: {response.status_code} {response.json()}")
++    assert response.status_code == 200
++    assert response.json() == {"kind": "dog", "bark": True}
++
++    # Test invalid discriminator
++    response = client.post("/pet", json={"kind": "bird", "fly": True})
++    print(f"Invalid discriminator response: {response.status_code} {response.json()}")
++    assert response.status_code == 422
++    # If discriminator is working, we should see 'union_tag_invalid'
++    assert any("union_tag_invalid" in str(error) for error in response.json()["detail"])
++
++    # Test missing discriminator
++    response = client.post("/pet", json={"meow": True})
++    print(f"Missing discriminator response: {response.status_code} {response.json()}")
++    assert response.status_code == 422
++    # If discriminator is working, we should see 'union_tag_invalid' or similar
++    assert any("union_tag_invalid" in str(error) for error in response.json()["detail"])
++
++if __name__ == "__main__":
++    try:
++        test_tagged_union_body()
++        print("Test passed!")
++    except Exception as e:
++        print(f"Test failed: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/repro_discriminator.py b/repro_discriminator.py
+new file mode 100644
+index 00000000..9d3c835b
+--- /dev/null
++++ b/repro_discriminator.py
+@@ -0,0 +1,48 @@
++
++from fastapi import FastAPI, Body
++from fastapi.testclient import TestClient
++from pydantic import BaseModel, Field
++from typing import Union, Annotated, Literal
++import pytest
++
++app = FastAPI()
++
++class Cat(BaseModel):
++    kind: Literal["cat"]
++    meow: str
++
++class Dog(BaseModel):
++    kind: Literal["dog"]
++    bark: str
++
++Pet = Annotated[Union[Cat, Dog], Field(discriminator="kind")]
++
++@app.post("/pet")
++async def create_pet(pet: Annotated[Pet, Body()]):
++    return pet
++
++client = TestClient(app)
++
++def test_discriminator_lost():
++    # Send a request with an invalid 'kind'
++    # If discriminator is working, it should fail with a specific error about the discriminator.
++    # If discriminator is lost, it will try to validate against Cat and Dog.
++    response = client.post("/pet", json={"kind": "bird", "meow": "no"})
++    
++    # Pydantic v2 error for invalid discriminator is usually 'union_tag_invalid'
++    # Let's see what we get.
++    print(f"Response status: {response.status_code}")
++    print(f"Response body: {response.json()}")
++    
++    # Check if any error has type 'union_tag_invalid'
++    errors = response.json()["detail"]
++    found_discriminator_error = any(err["type"] == "union_tag_invalid" for err in errors)
++    assert found_discriminator_error, f"Discriminator error not found. Errors: {errors}"
++
++if __name__ == "__main__":
++    try:
++        test_discriminator_lost()
++        print("Test passed!")
++    except Exception as e:
++        print(f"Test failed: {e}")
++        exit(1)

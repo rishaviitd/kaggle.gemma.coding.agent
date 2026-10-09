@@ -91,6 +91,7 @@ class VllmTraceProxy:
 
     def write_trace(self, path: Path, *, run: dict[str, Any], final: dict[str, Any]) -> None:
         shared_request = _shared_request(self.exchanges)
+        main_system = _system_text(self.exchanges[0]['request']) if self.exchanges and isinstance(self.exchanges[0].get('request'), dict) else ''
         turns = []
         previous_messages: list[dict[str, Any]] | None = None
         for index, exchange in enumerate(self.exchanges, start=1):
@@ -98,13 +99,15 @@ class VllmTraceProxy:
             response = exchange['response'] if isinstance(exchange['response'], dict) else {}
             message = ((response.get('choices') or [{}])[0].get('message') or {})
             tool_calls = _normalize_tool_calls(message.get('tool_calls', []))
-            next_request = (
-                self.exchanges[index]['request']
-                if index < len(self.exchanges) and isinstance(self.exchanges[index]['request'], dict)
-                else {}
-            )
+            system_text = _system_text(request)
+            later_requests = [
+                item['request']
+                for item in self.exchanges[index:]
+                if isinstance(item.get('request'), dict) and _system_text(item['request']) == system_text
+            ]
             turns.append({
                 'turn': index,
+                'caller': 'main' if system_text == main_system else 'subagent',
                 'input': _compact_request(request, shared_request, previous_messages),
                 'output': {
                     'response_status': exchange['response_status'],
@@ -112,7 +115,7 @@ class VllmTraceProxy:
                     'reasoning': message.get('reasoning') or message.get('reasoning_content'),
                     'tool_calls': tool_calls,
                 },
-                'tool_results': _tool_results(next_request, tool_calls),
+                'tool_results': _tool_results(later_requests, tool_calls),
             })
             previous_messages = _request_messages_without_shared_prefix(request, shared_request)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +130,16 @@ class VllmTraceProxy:
         from build_agent_trace import agent_trace
         path.with_name('agent_trace.json').write_text(
             json.dumps(agent_trace(trace), indent=2) + '\n')
+
+
+def _system_text(request: dict[str, Any]) -> str:
+    """Return the system message that identifies one conversation."""
+    for message in request.get('messages') or []:
+        if message.get('role') != 'system':
+            continue
+        content = message.get('content')
+        return content if isinstance(content, str) else json.dumps(content)
+    return ''
 
 
 def _decode_json(body: bytes) -> Any:
@@ -200,22 +213,31 @@ def _normalize_tool_calls(calls: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _tool_results(request: dict[str, Any], calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract exact tool responses that vLLM received in the next request."""
-    call_names = {call.get('id'): call.get('name') for call in calls}
-    results = []
-    for message in request.get('messages', []):
-        if message.get('role') not in {'tool', 'tool_responses'}:
-            continue
-        raw_content = message.get('content')
-        parsed_content = _decode_json(raw_content.encode()) if isinstance(raw_content, str) else raw_content
-        call_id = message.get('tool_call_id')
-        if call_id not in call_names:
-            continue
-        results.append({
-            'tool_call_id': call_id,
-            'name': call_names.get(call_id),
-            'output_raw_json': raw_content,
-            'output': parsed_content,
-        })
-    return results
+def _tool_results(requests: list[dict[str, Any]], calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract the tool response for each call, including one returned after a sub-agent.
+
+    A sub-agent makes its own model requests before the parent sees the tool
+    response, so the matching message may be several requests later. Callers
+    pass only requests from the same conversation, so a quoted call id in
+    another prompt is ignored. The first match for each call id is the response.
+    """
+    call_names = {call.get('id'): call.get('name') for call in calls if call.get('id')}
+    found: dict[str, dict[str, Any]] = {}
+    for request in requests:
+        for message in request.get('messages', []):
+            if message.get('role') not in {'tool', 'tool_responses'}:
+                continue
+            call_id = message.get('tool_call_id')
+            if call_id not in call_names or call_id in found:
+                continue
+            raw_content = message.get('content')
+            parsed_content = _decode_json(raw_content.encode()) if isinstance(raw_content, str) else raw_content
+            found[call_id] = {
+                'tool_call_id': call_id,
+                'name': call_names.get(call_id),
+                'output_raw_json': raw_content,
+                'output': parsed_content,
+            }
+        if len(found) == len(call_names):
+            break
+    return [found[call_id] for call_id in call_names if call_id in found]

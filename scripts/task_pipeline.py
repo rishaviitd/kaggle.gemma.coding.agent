@@ -150,7 +150,8 @@ def arguments():
         print(f'Resuming: skipping {len(completed)} completed task(s); '
               f'{len(args.task_ids)} remaining.', flush=True)
         if not args.task_ids:
-            p.error('No unfinished tasks remain for this submission and split.')
+            print('No unfinished tasks remain for this submission and split.', flush=True)
+            raise SystemExit(0)
     if len(args.task_ids) > 1 and any(
         getattr(args, name) is not None for name in ('snapshot', 'graph', 'embeddings', 'wheels')
     ):

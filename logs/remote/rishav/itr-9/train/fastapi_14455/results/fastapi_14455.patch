@@ -1,0 +1,82 @@
+diff --git a/fastapi/openapi/utils.py b/fastapi/openapi/utils.py
+index dbc93d28..24d5a3f0 100644
+--- a/fastapi/openapi/utils.py
++++ b/fastapi/openapi/utils.py
+@@ -87,7 +87,29 @@ def get_openapi_security_definitions(
+             exclude_none=True,
+         )
+         security_name = security_requirement.security_scheme.scheme_name
+-        security_definitions[security_name] = security_definition
++        if security_name in security_definitions:
++            existing_definition = security_definitions[security_name]
++            if (
++                existing_definition.get("type") == "oauth2"
++                and security_definition.get("type") == "oauth2"
++            ):
++                # Merge flows
++                existing_flows = existing_definition.get("flows", {})
++                new_flows = security_definition.get("flows", {})
++                for flow_name, flow_details in new_flows.items():
++                    if flow_name in existing_flows:
++                        # Merge scopes
++                        existing_scopes = existing_flows[flow_name].get("scopes", {})
++                        new_scopes = flow_details.get("scopes", {})
++                        existing_scopes.update(new_scopes)
++                        existing_flows[flow_name]["scopes"] = existing_scopes
++                    else:
++                        existing_flows[flow_name] = flow_details
++                security_definitions[security_name] = existing_definition
++            else:
++                security_definitions[security_name] = security_definition
++        else:
++            security_definitions[security_name] = security_definition
+         operation_security.append({security_name: security_requirement.scopes})
+     return security_definitions, operation_security
+ 
+diff --git a/repro_security_scopes.py b/repro_security_scopes.py
+new file mode 100644
+index 00000000..f55c1534
+--- /dev/null
++++ b/repro_security_scopes.py
+@@ -0,0 +1,41 @@
++from fastapi import FastAPI, Depends, Security
++from fastapi.security import OAuth2PasswordBearer
++from fastapi.openapi.utils import get_openapi_security_definitions
++from fastapi.routing import APIRoute
++
++app = FastAPI()
++
++auth1 = OAuth2PasswordBearer(tokenUrl="token", scopes={"me": "Read my profile"})
++auth2 = OAuth2PasswordBearer(tokenUrl="token", scopes={"items": "Read items"})
++
++@app.get("/me")
++def read_me(token: str = Security(auth1, scopes=["me"])):
++    return {"me": "me"}
++
++@app.get("/items")
++def read_items(token: str = Security(auth2, scopes=["items"])):
++    return {"items": "items"}
++
++def test_security_definitions():
++    openapi_schema = app.openapi()
++    security_schemes = openapi_schema["components"]["securitySchemes"]
++    
++    print(f"Security Schemes: {security_schemes}")
++    
++    scheme = security_schemes["OAuth2PasswordBearer"]
++    scopes = scheme["flows"]["password"]["scopes"]
++    print(f"Scopes: {scopes}")
++    
++    assert "me" in scopes
++    assert "items" in scopes
++
++if __name__ == "__main__":
++    try:
++        test_security_definitions()
++        print("Test passed!")
++    except AssertionError as e:
++        print("Test failed: Scopes were not merged.")
++        raise e
++    except Exception as e:
++        print(f"An error occurred: {e}")
++        raise e

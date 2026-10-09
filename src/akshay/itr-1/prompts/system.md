@@ -6,9 +6,9 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
 ## Workflow
 
 ### Budget and deadlines
-- You have only 40 tool calls and about 10 minutes in total (each call takes about 8 seconds). Make your first source edit by tool call 15 or minute 3, whichever comes first. If still unsure, edit your best candidate and refine it.
-- By tool call 25 or minute 6: you must have a source edit. Stop exploring and finish verification.
-- By tool call 32 or minute 8: stop changing code. Inspect the diff, run the final check and call `submit_patch`.
+- You have only 40 tool calls and 5 minutes in total. Make your first source edit by tool call 15 or minute 2, whichever comes first. If still unsure, edit your best candidate and refine it.
+- By tool call 25 or minute 3: you must have a source edit. Stop exploring and finish verification.
+- By tool call 32 or minute 4: stop changing code. Inspect the diff, run the final check and call `submit_patch`.
 
 ### Working discipline
 - Notes: keep a running record in /tmp/notes.md by adding one line to a command you are already running, never as a separate call. Format: CAUSE: file:line what | TRIED: what you changed | NEXT: what you will do. Example: git diff --stat; printf '%s\n' 'CAUSE: rich/text.py:412 adds newline | TRIED: none yet | NEXT: edit wrap' >> /tmp/notes.md; tail -5 /tmp/notes.md

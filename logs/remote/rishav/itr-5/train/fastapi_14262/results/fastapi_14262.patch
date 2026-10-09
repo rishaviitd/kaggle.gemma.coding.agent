@@ -1,17 +1,17 @@
 diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
-index 418c1172..53507c39 100644
+index 418c1172..b498cfed 100644
 --- a/fastapi/dependencies/models.py
 +++ b/fastapi/dependencies/models.py
-@@ -29,6 +29,7 @@ class Dependant:
-     background_tasks_param_name: Optional[str] = None
+@@ -30,6 +30,7 @@ class Dependant:
      security_scopes_param_name: Optional[str] = None
      security_scopes: Optional[List[str]] = None
-+    scope: str = "request"
      use_cache: bool = True
++    scope: str = "request"
      path: Optional[str] = None
      cache_key: Tuple[Optional[Callable[..., Any]], Tuple[str, ...]] = field(init=False)
+ 
 diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
-index 6477a2cb..177a98ad 100644
+index 6477a2cb..a89897eb 100644
 --- a/fastapi/dependencies/utils.py
 +++ b/fastapi/dependencies/utils.py
 @@ -237,6 +237,7 @@ def get_dependant(
@@ -22,6 +22,49 @@ index 6477a2cb..177a98ad 100644
  ) -> Dependant:
      dependant = Dependant(
          call=call,
+@@ -244,6 +245,7 @@ def get_dependant(
+         path=path,
+         security_scopes=security_scopes,
+         use_cache=use_cache,
++        scope=scope,
+     )
+     path_param_names = get_path_param_names(path)
+     endpoint_signature = get_typed_signature(call)
+@@ -276,6 +278,7 @@ def get_dependant(
+                 name=param_name,
+                 security_scopes=use_security_scopes,
+                 use_cache=param_details.depends.use_cache,
++                scope=param_details.depends.scope,
+             )
+             dependant.dependencies.append(sub_dependant)
+             continue
+@@ -584,6 +587,7 @@ async def solve_dependencies(
+     dependency_overrides_provider: Optional[Any] = None,
+     dependency_cache: Optional[Dict[Tuple[Callable[..., Any], Tuple[str]], Any]] = None,
+     async_exit_stack: AsyncExitStack,
++    function_exit_stack: Optional[AsyncExitStack] = None,
+     embed_body_fields: bool,
+ ) -> SolvedDependency:
+     values: Dict[str, Any] = {}
+@@ -627,6 +631,7 @@ async def solve_dependencies(
+             dependency_overrides_provider=dependency_overrides_provider,
+             dependency_cache=dependency_cache,
+             async_exit_stack=async_exit_stack,
++            function_exit_stack=function_exit_stack,
+             embed_body_fields=embed_body_fields,
+         )
+         background_tasks = solved_result.background_tasks
+@@ -636,8 +641,9 @@ async def solve_dependencies(
+         if sub_dependant.use_cache and sub_dependant.cache_key in dependency_cache:
+             solved = dependency_cache[sub_dependant.cache_key]
+         elif is_gen_callable(call) or is_async_gen_callable(call):
++            stack = async_exit_stack if sub_dependant.scope == "request" else function_exit_stack
+             solved = await solve_generator(
+-                call=call, stack=async_exit_stack, sub_values=solved_result.values
++                call=call, stack=stack, sub_values=solved_result.values
+             )
+         elif is_coroutine_callable(call):
+             solved = await call(**solved_result.values)
 diff --git a/fastapi/params.py b/fastapi/params.py
 index 2dc04be1..31150e81 100644
 --- a/fastapi/params.py
@@ -34,3 +77,123 @@ index 2dc04be1..31150e81 100644
  
  
  @dataclass
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 0b59d250..50a6f5d8 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -377,62 +377,64 @@ def get_request_handler(
+         assert isinstance(async_exit_stack, AsyncExitStack), (
+             "fastapi_inner_astack not found in request scope"
+         )
+-        solved_result = await solve_dependencies(
+-            request=request,
+-            dependant=dependant,
+-            body=body,
+-            dependency_overrides_provider=dependency_overrides_provider,
+-            async_exit_stack=async_exit_stack,
+-            embed_body_fields=embed_body_fields,
+-        )
+-        errors = solved_result.errors
+-        if not errors:
+-            raw_response = await run_endpoint_function(
++        async with AsyncExitStack() as function_exit_stack:
++            solved_result = await solve_dependencies(
++                request=request,
+                 dependant=dependant,
+-                values=solved_result.values,
+-                is_coroutine=is_coroutine,
++                body=body,
++                dependency_overrides_provider=dependency_overrides_provider,
++                async_exit_stack=async_exit_stack,
++                function_exit_stack=function_exit_stack,
++                embed_body_fields=embed_body_fields,
+             )
+-            if isinstance(raw_response, Response):
+-                if raw_response.background is None:
+-                    raw_response.background = solved_result.background_tasks
+-                response = raw_response
+-            else:
+-                response_args: Dict[str, Any] = {
+-                    "background": solved_result.background_tasks
+-                }
+-                # If status_code was set, use it, otherwise use the default from the
+-                # response class, in the case of redirect it's 307
+-                current_status_code = (
+-                    status_code if status_code else solved_result.response.status_code
+-                )
+-                if current_status_code is not None:
+-                    response_args["status_code"] = current_status_code
+-                if solved_result.response.status_code:
+-                    response_args["status_code"] = solved_result.response.status_code
+-                content = await serialize_response(
+-                    field=response_field,
+-                    response_content=raw_response,
+-                    include=response_model_include,
+-                    exclude=response_model_exclude,
+-                    by_alias=response_model_by_alias,
+-                    exclude_unset=response_model_exclude_unset,
+-                    exclude_defaults=response_model_exclude_defaults,
+-                    exclude_none=response_model_exclude_none,
++            errors = solved_result.errors
++            if not errors:
++                raw_response = await run_endpoint_function(
++                    dependant=dependant,
++                    values=solved_result.values,
+                     is_coroutine=is_coroutine,
+                 )
+-                response = actual_response_class(content, **response_args)
+-                if not is_body_allowed_for_status_code(response.status_code):
+-                    response.body = b""
+-                response.headers.raw.extend(solved_result.response.headers.raw)
+-        if errors:
+-            validation_error = RequestValidationError(
+-                _normalize_errors(errors), body=body
+-            )
+-            raise validation_error
++                if isinstance(raw_response, Response):
++                    if raw_response.background is None:
++                        raw_response.background = solved_result.background_tasks
++                    response = raw_response
++                else:
++                    response_args: Dict[str, Any] = {
++                        "background": solved_result.background_tasks
++                    }
++                    # If status_code was set, use it, otherwise use the default from the
++                    # response class, in the case of redirect it's 307
++                    current_status_code = (
++                        status_code if status_code else solved_result.response.status_code
++                    )
++                    if current_status_code is not None:
++                        response_args["status_code"] = current_status_code
++                    if solved_result.response.status_code:
++                        response_args["status_code"] = solved_result.response.status_code
++                    content = await serialize_response(
++                        field=response_field,
++                        response_content=raw_response,
++                        include=response_model_include,
++                        exclude=response_model_exclude,
++                        by_alias=response_model_by_alias,
++                        exclude_unset=response_model_exclude_unset,
++                        exclude_defaults=response_model_exclude_defaults,
++                        exclude_none=response_model_exclude_none,
++                        is_coroutine=is_coroutine,
++                    )
++                    response = actual_response_class(content, **response_args)
++                    if not is_body_allowed_for_status_code(response.status_code):
++                        response.body = b""
++                    response.headers.raw.extend(solved_result.response.headers.raw)
++            if errors:
++                validation_error = RequestValidationError(
++                    _normalize_errors(errors), body=body
++                )
++                raise validation_error
+ 
+-        # Return response
+-        assert response
+-        return response
++            # Return response
++            assert response
++            return response
+ 
+     return app
+ 

@@ -28,8 +28,8 @@ Aim to understand, resolve, and submit the fix in the minimum number of tool cal
   2. Verify `patch_size > 0` and `files_changed > 0`.
   3. Output a short summary of the fix to end the session.
 
-## Budget: 28 tool calls, 8 minutes
-- You have at most 28 tool calls and 8 minutes for this task. When either runs out, the working tree is graded as it is, so an edit made in time counts even if you never reach `submit_patch`.
+## Budget: 40 tool calls, 5 minutes
+- You have at most 40 tool calls and 5 minutes for this task. When either runs out, the working tree is graded as it is, so an edit made in time counts even if you never reach `submit_patch`.
 - Use at most about 10 tool calls to find and read the code.
 - By your 12th tool call you must have edited a source file. If you have not, stop exploring and make your best-guess edit in the most likely place now. Runs that are still only reading after 12 calls almost never succeed; more reading does not help.
 - After your edit: one compile check or one targeted test, a correction if needed, then `submit_patch`. Do not start new exploration after your 20th tool call.

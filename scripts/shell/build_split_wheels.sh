@@ -7,7 +7,7 @@ shopt -s nullglob
 for split in train dev val; do
   manifest="data/$split/manifest.csv"
   if [[ ! -f "$manifest" ]]; then
-    echo "Missing $manifest. Run scripts/plan_task_splits.py --materialize first." >&2
+    echo "Missing $manifest. Run scripts/plan_observed_task_splits.py --materialize first." >&2
     exit 1
   fi
   while IFS= read -r task_id; do

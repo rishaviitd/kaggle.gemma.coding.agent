@@ -1,0 +1,74 @@
+diff --git a/fastapi/openapi/utils.py b/fastapi/openapi/utils.py
+index dbc93d28..d1dc9d81 100644
+--- a/fastapi/openapi/utils.py
++++ b/fastapi/openapi/utils.py
+@@ -87,7 +87,26 @@ def get_openapi_security_definitions(
+             exclude_none=True,
+         )
+         security_name = security_requirement.security_scheme.scheme_name
+-        security_definitions[security_name] = security_definition
++        if security_name in security_definitions:
++            existing_definition = security_definitions[security_name]
++            if (
++                existing_definition.get("type") == "oauth2"
++                and security_definition.get("type") == "oauth2"
++            ):
++                existing_flows = existing_definition.get("flows", {})
++                new_flows = security_definition.get("flows", {})
++                for flow_type, flow_data in new_flows.items():
++                    if flow_type in existing_flows:
++                        existing_scopes = existing_flows[flow_type].get("scopes", {})
++                        new_scopes = flow_data.get("scopes", {})
++                        existing_flows[flow_type]["scopes"] = {**existing_scopes, **new_scopes}
++                    else:
++                        existing_flows[flow_type] = flow_data
++            else:
++                security_definitions[security_name] = security_definition
++        else:
++            security_definitions[security_name] = security_definition
++        print(f"DEBUG: security_name={security_name}, security_definitions={security_definitions}")
+         operation_security.append({security_name: security_requirement.scopes})
+     return security_definitions, operation_security
+ 
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 00000000..9a1041e4
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,36 @@
++from fastapi import FastAPI, Depends, Security
++from fastapi.security import OAuth2PasswordBearer
++from fastapi.openapi.utils import get_openapi
++import json
++
++app = FastAPI()
++
++auth1 = OAuth2PasswordBearer(tokenUrl="token", scopes={"read": "Read access"})
++auth2 = OAuth2PasswordBearer(tokenUrl="token", scopes={"write": "Write access"})
++
++@app.get("/read")
++def read(token: str = Security(auth1, scopes=["read"])):
++    return {"token": token}
++
++@app.get("/write")
++def write(token: str = Security(auth2, scopes=["write"])):
++    return {"token": token}
++
++openapi_schema = get_openapi(title="Test App", version="1.0.0", routes=app.routes)
++security_schemes = openapi_schema.get("components", {}).get("securitySchemes", {})
++oauth2_scheme = security_schemes.get("OAuth2PasswordBearer", {})
++password_flow = oauth2_scheme.get("flows", {}).get("password", {})
++scopes = password_flow.get("scopes", {})
++
++print(f"Scopes: {scopes}")
++expected_scopes = {"read": "Read access", "write": "Write access"}
++if scopes == expected_scopes:
++    print("SUCCESS: All scopes are present")
++else:
++    print(f"FAILURE: Expected {expected_scopes}, got {scopes}")
++
++# Also check if the operations have the correct security requirements
++for path, methods in openapi_schema.get("paths", {}).items():
++    for method, op in methods.items():
++        security = op.get("security", [])
++        print(f"Path {path} {method} security: {security}")

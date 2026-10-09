@@ -57,7 +57,7 @@ the layout above, run `python3 scripts/build_trace_index.py`. The viewer's
 **Trace directory** control then lets you switch between every discovered
 directory (for example, `base`, `akshay/itr-1`, or `rishav/itr-1`).
 
-The split folders reference shared files in `data/assets/`, which are local downloads and are not committed. Run `scripts/plan_task_splits.py --materialize` after restoring the Kaggle data to rebuild those references.
+The split folders reference shared files in `data/assets/`, which are local downloads and are not committed. Run `scripts/plan_observed_task_splits.py --materialize` after restoring the Kaggle data to rebuild those references.
 
 ## Data
 
@@ -188,7 +188,7 @@ The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses
 Keep physical assets in one place under `data/assets/`: snapshots, graphs, embeddings, and task-specific wheel caches. Split folders contain task metadata and symlinks to only the assets their tasks use. Wheel caches are keyed by task ID, so changing split assignments does not require rebuilding them.
 
 ```bash
-python3 scripts/plan_task_splits.py --materialize
+python3 scripts/plan_observed_task_splits.py --materialize
 bash scripts/shell/build_split_wheels.sh
 ```
 

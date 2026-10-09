@@ -1,0 +1,142 @@
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 20cb2c88..8798d40f 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -787,9 +787,8 @@ def request_params_to_args(
+                 )
+         value = _get_multidict_value(field, received_params, alias=alias)
+         if value is not None:
+-            params_to_process[field.name] = value
+-        processed_keys.add(alias or field.alias)
+-        processed_keys.add(field.name)
++            params_to_process[alias or field.alias or field.name] = value
++        processed_keys.add(alias or field.alias or field.name)
+ 
+     for key in received_params.keys():
+         if key not in processed_keys:
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 00000000..11477e54
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,76 @@
++
++from fastapi import FastAPI, Depends, Query
++from fastapi.testclient import TestClient
++from pydantic import BaseModel, Field
++from typing import Optional
++
++app = FastAPI()
++
++class FilterParams(BaseModel):
++    q: Optional[str] = Field(None, alias="query")
++
++@app.get("/items")
++async def read_items(params: FilterParams = Depends()):
++    return {"params": params.dict()}
++
++client = TestClient(app)
++
++def test_alias_extraction():
++    # Issue 1: Value is extracted by alias, but put into values with key field.name
++    # If allow_population_by_field_name=False, this should fail if we use field.name
++    class RequiredParams(BaseModel):
++        q: str = Field(..., alias="query")
++        class Config:
++            allow_population_by_field_name = False
++
++    @app.get("/required_alias")
++    async def read_required_alias(params: RequiredParams = Depends()):
++        return {"params": params.dict()}
++
++    # /required_alias?query=foo -> Should be OK
++    response = client.get("/required_alias?query=foo")
++    print(f"Response for /required_alias?query=foo: {response.json()}")
++    assert response.status_code == 200
++    assert response.json()["params"]["q"] == "foo"
++
++def test_name_extraction():
++    # Issue 2: If we pass value by name, it should be treated as extra or validation error
++    class RequiredParams(BaseModel):
++        q: str = Field(..., alias="query")
++        class Config:
++            allow_population_by_field_name = False
++
++    @app.get("/required_name")
++    async def read_required_name(params: RequiredParams = Depends()):
++        return {"params": params.dict()}
++
++    # /required_name?q=foo -> Validation Error. 
++    # The issue is that 'q' should be in the 'input' of the error, but it's not.
++    response = client.get("/required_name?q=foo")
++    print(f"Response for /required_name?q=foo: {response.json()}")
++    assert response.status_code == 422
++    # Check if 'q' is in the error details.
++    # In Pydantic v2, it's in 'input'.
++    detail = response.json()["detail"]
++    print(f"Error detail: {detail}")
++    # We expect 'q' to be in the input of the error
++    # The error is likely for the missing 'query' field.
++    found_q_in_input = any('q' in err.get('input', {}) for err in detail)
++    assert found_q_in_input, f"Expected 'q' in input, but got {detail}"
++
++if __name__ == "__main__":
++    try:
++        test_alias_extraction()
++        print("test_alias_extraction passed")
++    except Exception as e:
++        print(f"test_alias_extraction failed: {e}")
++        import traceback
++        traceback.print_exc()
++
++    try:
++        test_name_extraction()
++        print("test_name_extraction passed")
++    except Exception as e:
++        print(f"test_name_extraction failed: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_pydantic.py b/test_pydantic.py
+new file mode 100644
+index 00000000..26755f5f
+--- /dev/null
++++ b/test_pydantic.py
+@@ -0,0 +1,16 @@
++from pydantic import BaseModel, Field
++from pydantic import ConfigDict
++
++class Model(BaseModel):
++    model_config = ConfigDict(populate_by_name=False)
++    q: str = Field(..., alias="query")
++
++try:
++    print(f"By name: {Model.model_validate({'q': 'foo'})}")
++except Exception as e:
++    print(f"By name failed: {e}")
++
++try:
++    print(f"By alias: {Model.model_validate({'query': 'foo'})}")
++except Exception as e:
++    print(f"By alias failed: {e}")
+diff --git a/test_pydantic.py` b/test_pydantic.py`
+new file mode 100644
+index 00000000..2062ba1a
+--- /dev/null
++++ b/test_pydantic.py`
+@@ -0,0 +1,16 @@
++from pydantic import BaseModel, Field
++from pydantic import ConfigDict
++
++class Model(BaseModel):
++    model_config = ConfigDict(populate_by_name=False)
++    q: str = Field(..., alias="query")
++
++try:
++    print(Model.model_validate({"q": "foo"}))
++except Exception as e:
++    print(f"Failed: {e}")
++
++try:
++    print(Model.model_validate({"query": "foo"}))
++except Exception as e:
++    print(f"Failed: {e}")
