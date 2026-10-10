@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from .models import COLUMNS, ExperimentData, table
 from .adapters.vllm_trace_v1 import normalize, SCHEMA_VERSION
+from .token_usage import enrich_token_usage
 
 EXCLUDED = {'reports','__pycache__','.cache','cache','.git','.venv','node_modules','.ipynb_checkpoints'}
 
@@ -23,6 +24,10 @@ def load_experiment(trace_dir, experiment_id='baseline_v1', trace_globs=None, st
         try:
             raw = path.read_bytes(); digest = hashlib.sha256(raw).hexdigest()
             data = json.loads(raw)
+            if (isinstance(data,dict) and str(data.get('schema_version','')).startswith('ATIF-')
+                    and path.parent.name=='traces' and (path.parent.parent/'model_trace.json').is_file()):
+                # This is an enrichment sidecar, not a second agent attempt.
+                continue
             if not isinstance(data,dict) or not isinstance(data.get('turns'),list):
                 raise ValueError('Trace must be an object with a turns list')
             run = data.get('run') if isinstance(data.get('run'),dict) else {}
@@ -33,6 +38,7 @@ def load_experiment(trace_dir, experiment_id='baseline_v1', trace_globs=None, st
             if strict_schema and data.get('schema_version')!=SCHEMA_VERSION:
                 raise ValueError(f'Unsupported schema: {data.get("schema_version")}')
             normalize(data,path,digest,experiment_id,rows,redact_text,include_reasoning_in_viewer)
+            enrich_token_usage(data,path,rows,lengths,redact_text)
             rows['intake'].append(dict(trace_path=str(path),accepted=True,reason=None,trace_hash=digest))
         except Exception as exc:
             # Roll back partial normalization, keeping the rest of the batch intact.

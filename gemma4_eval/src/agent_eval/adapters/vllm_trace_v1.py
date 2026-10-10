@@ -39,7 +39,7 @@ def normalize(data, path, trace_hash, experiment_id, rows, redact_text=True, inc
         rid += f':copy{sum(r["trace_hash"] == trace_hash for r in rows["runs"])+1}'
     def ev(pointer, text, turn=None, call=None):
         eid = f'{rid}:e{sum(e["run_id"] == rid for e in rows["evidence"])+1}'
-        rows['evidence'].append(dict(evidence_id=eid,run_id=rid,trace_path=str(path),json_pointer=pointer,turn_number=turn,tool_call_id=call,excerpt=excerpt(text, enabled=redact_text)))
+        rows['evidence'].append(dict(evidence_id=eid,run_id=rid,trace_path=str(path),source_hash=trace_hash,json_pointer=pointer,turn_number=turn,tool_call_id=call,excerpt=excerpt(text, enabled=redact_text)))
         return eid
     def issue(field, kind, description, eid=None):
         rows['quality_issues'].append(dict(issue_id=f'{rid}:q{sum(q["run_id"] == rid for q in rows["quality_issues"])+1}',run_id=rid,field_path=field,issue_type=kind,description=description,evidence_id=eid or run_eid))
@@ -90,6 +90,9 @@ def normalize(data, path, trace_hash, experiment_id, rows, redact_text=True, inc
             usage[field]=numeric(usage.get(field),f'turns.{ti}.usage.{field}',True)
         details=mapping(usage.get('completion_tokens_details'))
         reasoning_tokens=numeric(details.get('reasoning_tokens'),f'turns.{ti}.usage.reasoning_tokens',True)
+        prompt_details=mapping(usage.get('prompt_tokens_details'))
+        cached_tokens=numeric(prompt_details.get('cached_tokens',usage.get('cached_tokens')),f'turns.{ti}.usage.cached_tokens',True)
+        total_tokens=numeric(usage.get('total_tokens'),f'turns.{ti}.usage.total_tokens',True)
         content = out.get('assistant_content',message.get('content'))
         tools = out.get('tool_calls')
         if tools is None:
@@ -107,7 +110,8 @@ def normalize(data, path, trace_hash, experiment_id, rows, redact_text=True, inc
         summary_cue = bool(re.search(r'summariz|summaris|compaction|context.{0,15}(?:reset|summary)|the ai agent is tasked',prompt+'\n'+str(content or ''),re.I))
         compact = bool(turn.get('is_compaction') or (not tools and summary_cue and len(messages)<=2 and ti+1<len(data['turns']) and len(next_messages)>len(messages)))
         turn_eid = ev(f'/turns/{ti}/output',content or '(no assistant text)',n)
-        rows['turns'].append(dict(run_id=rid,turn_number=n,created_epoch=numeric(response.get('created'),f'turns.{ti}.created'),finish_reason=choice.get('finish_reason'),prompt_tokens=usage.get('prompt_tokens'),completion_tokens=usage.get('completion_tokens'),reasoning_tokens=reasoning_tokens,is_compaction=compact,compaction_confidence='explicit' if turn.get('is_compaction') else ('heuristic_high' if compact else None),assistant_text_available=bool(content),assistant_excerpt=excerpt(content or '',enabled=redact_text),reasoning_excerpt=excerpt(out.get('reasoning') or message.get('reasoning') or '',enabled=redact_text) if include_reasoning_in_viewer else None,evidence_id=turn_eid))
+        has_usage=any(usage.get(key) is not None for key in ('prompt_tokens','completion_tokens','total_tokens'))
+        rows['turns'].append(dict(run_id=rid,turn_number=n,created_epoch=numeric(response.get('created'),f'turns.{ti}.created'),finish_reason=choice.get('finish_reason'),prompt_tokens=usage.get('prompt_tokens'),completion_tokens=usage.get('completion_tokens'),cached_tokens=cached_tokens,total_tokens=total_tokens,reasoning_tokens=reasoning_tokens,usage_source='model_trace' if has_usage else None,usage_evidence_id=turn_eid if has_usage else None,is_compaction=compact,compaction_confidence='explicit' if turn.get('is_compaction') else ('heuristic_high' if compact else None),assistant_text_available=bool(content),assistant_excerpt=excerpt(content or '',enabled=redact_text),reasoning_excerpt=excerpt(out.get('reasoning') or message.get('reasoning') or '',enabled=redact_text) if include_reasoning_in_viewer else None,evidence_id=turn_eid))
         if compact:
             event(n,seq+.1,'compaction',None,None,'heuristic' if not turn.get('is_compaction') else 'explicit',turn_eid)
         schemas = {}

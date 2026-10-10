@@ -52,11 +52,15 @@ def summarize_batch(experiment, metrics, findings):
     issues = e.quality_issues.groupby('run_id').issue_type.apply(list).to_dict() if len(e.quality_issues) else {}
     calls_by_run = {rid: group for rid, group in e.tool_calls.groupby('run_id')} if len(e.tool_calls) else {}
     tests_by_run = {rid: group for rid, group in e.test_evidence.groupby('run_id')} if len(e.test_evidence) else {}
+    turns_by_run = {rid: group for rid, group in e.turns.groupby('run_id')} if len(e.turns) else {}
     task_rows = []
     for r in runs.itertuples():
         rid = r.run_id
         calls = calls_by_run.get(rid)
         tests = tests_by_run.get(rid)
+        turns = turns_by_run.get(rid)
+        token_turns_total = len(turns) if turns is not None else 0
+        token_turns_measured = int((turns.prompt_tokens.notna() & turns.completion_tokens.notna()).sum()) if turns is not None else 0
         first_edit = metric(rid, 'first_source_edit_call')
         source_edits = metric(rid, 'confirmed_source_edits')
         post_test = metric(rid, 'C08')
@@ -89,11 +93,13 @@ def summarize_batch(experiment, metrics, findings):
             submit_attempts=submit, repeated_submit_attempts=max(0,submit-1),
             duration_seconds=_number(r.duration_seconds), completion_tokens=metric(rid,'completion_tokens'),
             prompt_tokens=metric(rid,'prompt_tokens'),
+            token_turns_measured=token_turns_measured, token_turns_total=token_turns_total,
+            token_turn_coverage=token_turns_measured/token_turns_total if token_turns_total else None,
             primary_stage=stage, stage_confidence=confidence,
             quality_issue_types=sorted(set(issues.get(rid,[]))),
             trace_path=r.trace_path, trace_hash=r.trace_hash,
         ))
-    tasks = pd.DataFrame(task_rows, columns='run_id task_id attempt_id repo outcome resolved_nullable harness_status final_test_exit_code external_test_recorded external_test_passed has_patch parseable_patch confirmed_source_edits source_edit_recorded first_source_edit_call post_edit_agent_test post_edit_test_availability agent_test_count agent_test_failed budget_stage budgeted_tool_calls observed_harness_limit tool_attempts tool_result_records tool_errors unmatched_calls submit_attempts repeated_submit_attempts duration_seconds completion_tokens prompt_tokens primary_stage stage_confidence quality_issue_types trace_path trace_hash'.split())
+    tasks = pd.DataFrame(task_rows, columns='run_id task_id attempt_id repo outcome resolved_nullable harness_status final_test_exit_code external_test_recorded external_test_passed has_patch parseable_patch confirmed_source_edits source_edit_recorded first_source_edit_call post_edit_agent_test post_edit_test_availability agent_test_count agent_test_failed budget_stage budgeted_tool_calls observed_harness_limit tool_attempts tool_result_records tool_errors unmatched_calls submit_attempts repeated_submit_attempts duration_seconds completion_tokens prompt_tokens token_turns_measured token_turns_total token_turn_coverage primary_stage stage_confidence quality_issue_types trace_path trace_hash'.split())
     overview = outcome_summary(e.runs)
     overview.update(dict(discovered=len(e.intake),accepted=int(e.intake.accepted.sum()) if len(e.intake) else 0,
                          rejected=int((~e.intake.accepted.astype(bool)).sum()) if len(e.intake) else 0,
@@ -151,7 +157,12 @@ def summarize_batch(experiment, metrics, findings):
     for group_name, group in [('all',tasks),('resolved',tasks[tasks.outcome.eq('resolved')] if total else tasks),('unresolved',unresolved),('unknown',tasks[tasks.outcome.eq('unknown')] if total else tasks)]:
         for key,unit in [('duration_seconds','seconds'),('budgeted_tool_calls','calls'),('tool_attempts','attempts'),('completion_tokens','reported tokens'),('prompt_tokens','reported tokens')]:
             values=pd.to_numeric(group[key],errors='coerce').dropna() if len(group) else pd.Series(dtype=float)
+            token_metric=key in ('completion_tokens','prompt_tokens')
+            measured_turns=int(group.token_turns_measured.sum()) if token_metric and len(group) else None
+            total_turns=int(group.token_turns_total.sum()) if token_metric and len(group) else None
             cost_rows.append(dict(group=group_name,metric=key,unit=unit,available=len(values),total_attempts=len(group),coverage=len(values)/len(group) if len(group) else None,
+                                  measured_turns=measured_turns,total_turns=total_turns,
+                                  turn_coverage=measured_turns/total_turns if total_turns else None,
                                   median=float(values.median()) if len(values) else None,p90=float(values.quantile(.9)) if len(values) else None,
                                   min=float(values.min()) if len(values) else None,max=float(values.max()) if len(values) else None))
     cost=pd.DataFrame(cost_rows)

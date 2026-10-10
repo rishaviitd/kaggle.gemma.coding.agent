@@ -45,7 +45,8 @@ def read_evidence(experiment, evidence_id, max_chars=24000):
     import hashlib
     raw = Path(row.trace_path).read_bytes()
     run = experiment.runs.set_index('run_id').loc[row.run_id]
-    if hashlib.sha256(raw).hexdigest() != run.trace_hash:
+    expected = row.source_hash if isinstance(row.source_hash, str) and row.source_hash else run.trace_hash
+    if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError('Source trace changed since ingestion; reload before inspecting.')
     node = json.loads(raw)
     for key in row.json_pointer.strip('/').split('/'):
