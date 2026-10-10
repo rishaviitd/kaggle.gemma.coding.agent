@@ -1,6 +1,6 @@
 # Gemma 4 post-run trace analytics
 
-An offline notebook and reusable Python engine for completed coding-agent traces. The notebook uses a sibling repository’s `logs/remote/akshay/itr-1` when present, then the original local trace path; set `GEMMA_TRACE_DIR` to override it. Source traces are read only: the library never executes commands, patches, tests, or code found inside them.
+An offline-by-default notebook and reusable Python engine for completed coding-agent traces. The notebook uses a sibling repository’s `logs/remote/akshay/itr-1` when present, then the original local trace path; set `GEMMA_TRACE_DIR` to override it. Source traces are read only: the library never executes commands, patches, tests, or code found inside them.
 
 ## Open the results
 
@@ -11,7 +11,7 @@ An offline notebook and reusable Python engine for completed coding-agent traces
 
 ## Environment and execution
 
-Launch the notebook with `scripts/launch_notebook.sh` from this folder. The project has its own `.venv`. Dependencies were installed once during setup; no notebook cell installs packages or calls remote services. To recreate the environment:
+Launch the notebook with `scripts/launch_notebook.sh` from this folder. The project has its own `.venv`. Dependencies were installed once during setup; no notebook cell installs packages. Model calls happen only with the optional, confirmed Codex review. To recreate the environment:
 
 ```bash
 cd /Users/akshay/kaggle/gemma4_eval
@@ -44,6 +44,27 @@ GEMMA_EXECUTED_NOTEBOOK=new-run.executed.ipynb \
 ```
 
 `GEMMA_TRACE_GLOBS` accepts comma-separated patterns. `GEMMA_EXECUTED_NOTEBOOK` is a filename saved inside `notebooks/`; when omitted, the usual executed notebook is replaced.
+
+### Optional Codex review
+
+The notebook can ask the authenticated Codex CLI to review a bounded digest of each trace. This adds judge-derived summaries, possible root causes, flagged turns, and rule-finding verdicts to both HTML reports and `llm_reviews.csv`/`.jsonl`. Official outcomes, rates, and rule findings do not change. Ordinary notebook runs make no model calls and render no review sections.
+
+Preview the number of requests and token/cost estimate without running the notebook or calling Codex:
+
+```bash
+GEMMA_TRACE_DIR=/path/to/train GEMMA_OUTPUT_DIR=reports/new-run \
+  .venv/bin/python scripts/execute_notebook.py --estimate --max-runs 5
+```
+
+Run the same notebook with review enabled; the launcher asks you to type `REVIEW` before any uncached call:
+
+```bash
+GEMMA_TRACE_DIR=/path/to/train GEMMA_OUTPUT_DIR=reports/new-run \
+GEMMA_LLM_REVIEW=1 \
+  .venv/bin/python scripts/execute_notebook.py --max-runs 5
+```
+
+For a directly opened notebook, set `GEMMA_LLM_REVIEW=1` before starting Jupyter; its review cell displays the estimate and prompts for confirmation. `GEMMA_LLM_REVIEW_CONFIRM=REVIEW` provides the same explicit confirmation for noninteractive execution. `GEMMA_LLM_REVIEW_MODEL` overrides the default `gpt-6.1-sol`; `GEMMA_LLM_REVIEW_MAX_INPUT_TOKENS` defaults to 30,000 for the digest, not total Codex CLI usage. The estimate includes a 16,000-input-token per-call planning allowance after the first live pilot used 26,616 input tokens against an 11,025-token digest estimate. It uses API-equivalent public prices and a fixed output-token assumption; actual Codex plan usage may differ. Codex authentication is checked locally. Cache files in `<output_dir>/.review_cache` contain model responses only, keyed by model, prompt version, and digest. Start with 5–10 manually labelled attempts and compare root-cause and rule-verdict accuracy before relying on the batch counts.
 
 For public training tasks, prepare those optional gold inputs with `scripts/prepare_gold_inputs.py --tasks-jsonl /path/to/tasks.jsonl --trace-dir /path/to/train --output-dir data/gold/new-run`. This writes reference patches and task-specific, read-only baseline files fetched at each task's `base_commit`. Keep these inputs outside the agent's runtime; they are for post-run evaluation only. The Rishav ITR-9 report uses the 30 matching public training patches. Function-level scores are available for 16 tasks; added/renamed functions or module-level changes make the remaining 14 unavailable, while file overlap is still exported.
 
@@ -101,7 +122,7 @@ Gold files are keyed as `GOLD_DIR/<task_id>.patch`. `repo_roots` maps a task ID 
 
 A comparison batch is loaded with a separate experiment ID and paired by unique task ID and repository. Researchers must confirm that model/configuration/evaluation conditions are comparable. These are descriptive transitions, not causal effects or pass@k estimates.
 
-Advanced modules report their prerequisites in `modules.csv`. Patch scope, recorded graph-tool usage, test recovery, descriptive reliability and cross-config views are supported to the extent evidence exists. Edit survival requires intermediate snapshots. A calibrated semantic judge is an explicit optional non-goal and remains unavailable; no judge API is contacted.
+Advanced modules report their prerequisites in `modules.csv`. Patch scope, recorded graph-tool usage, test recovery, descriptive reliability and cross-config views are supported to the extent evidence exists. Edit survival requires intermediate snapshots. The optional Codex reviewer produces uncalibrated semantic labels only when enabled; these are shown separately from official metrics.
 
 ## Exports and reproducibility
 

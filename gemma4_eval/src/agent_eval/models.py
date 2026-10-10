@@ -39,6 +39,7 @@ class MetricData:
     pairing: pd.DataFrame = field(default_factory=pd.DataFrame)
     gold: pd.DataFrame = field(default_factory=pd.DataFrame)
     modules: pd.DataFrame = field(default_factory=pd.DataFrame)
+    reviews: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 @dataclass
 class FindingsData:
