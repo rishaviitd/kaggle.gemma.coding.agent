@@ -30,6 +30,23 @@ PYTHONPATH=src .venv/bin/python -m agent_eval.cli \
 .venv/bin/python -m pytest -q
 ```
 
+To execute the same notebook for another trace batch while keeping the original outputs:
+
+```bash
+GEMMA_TRACE_DIR=/path/to/train \
+GEMMA_TRACE_GLOBS='**/model_trace.json' \
+GEMMA_GOLD_DIR=/Users/akshay/kaggle/gemma4_eval/data/gold/new-run/patches \
+GEMMA_REPO_ROOTS_JSON=/Users/akshay/kaggle/gemma4_eval/data/gold/new-run/repo_roots.json \
+GEMMA_OUTPUT_DIR=/Users/akshay/kaggle/gemma4_eval/reports/new-run \
+GEMMA_EXPERIMENT_ID=new-run \
+GEMMA_EXECUTED_NOTEBOOK=new-run.executed.ipynb \
+  .venv/bin/python scripts/execute_notebook.py
+```
+
+`GEMMA_TRACE_GLOBS` accepts comma-separated patterns. `GEMMA_EXECUTED_NOTEBOOK` is a filename saved inside `notebooks/`; when omitted, the usual executed notebook is replaced.
+
+For public training tasks, prepare those optional gold inputs with `scripts/prepare_gold_inputs.py --tasks-jsonl /path/to/tasks.jsonl --trace-dir /path/to/train --output-dir data/gold/new-run`. This writes reference patches and task-specific, read-only baseline files fetched at each task's `base_commit`. Keep these inputs outside the agent's runtime; they are for post-run evaluation only. The Rishav ITR-9 report uses the 30 matching public training patches. Function-level scores are available for 16 tasks; added/renamed functions or module-level changes make the remaining 14 unavailable, while file overlap is still exported.
+
 CLI options: `--gold-dir`, `--repo-roots` (JSON file), `--compare-dir`, `--strict-schema`, `--parquet`, `--no-html`, `--include-reasoning`, and `--no-redact`. Text redaction is on and reasoning is hidden by default, including in lazy source inspection. Redaction is a best-effort pattern scrub, not a guarantee that arbitrary private text is removed. Source paths remain for auditability. Review exports before sharing them.
 
 ## Stable Python interfaces
@@ -80,7 +97,7 @@ The separate whole-batch report contains official outcome counts and Wilson inte
 
 ## Optional enrichment inputs
 
-Gold files are keyed as `GOLD_DIR/<task_id>.patch`. `repo_roots` maps the exact recorded repository name (for example `fastapi/fastapi`) to a **pristine baseline** checkout. Function mapping supports Python AST ranges; unsupported languages, unmappable additions/module changes, malformed gold diffs, and missing paths give unavailable reasons. The supplied batch does not include gold/reference repositories, so C04/C05 are unavailable. No symbol recall is inferred from file overlap.
+Gold files are keyed as `GOLD_DIR/<task_id>.patch`. `repo_roots` maps a task ID to its **pristine baseline** snapshot, with repository-name mapping (for example `fastapi/fastapi`) as a fallback. Function mapping supports Python AST ranges; unsupported languages, unmappable additions/module changes, malformed gold diffs, and missing paths give unavailable reasons. No symbol recall is inferred from file overlap.
 
 A comparison batch is loaded with a separate experiment ID and paired by unique task ID and repository. Researchers must confirm that model/configuration/evaluation conditions are comparable. These are descriptive transitions, not causal effects or pass@k estimates.
 

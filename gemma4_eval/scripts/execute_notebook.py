@@ -16,6 +16,11 @@ try:
     client.execute()
 finally:
     if km.has_kernel:km.shutdown_kernel(now=True)
-nbformat.write(nb,root/'notebooks/01_agent_trace_report.executed.ipynb')
+executed_name = os.environ.get('GEMMA_EXECUTED_NOTEBOOK', '01_agent_trace_report.executed.ipynb')
+if Path(executed_name).name != executed_name or not executed_name.endswith('.ipynb'):
+    raise ValueError('GEMMA_EXECUTED_NOTEBOOK must be an .ipynb filename')
+executed_path = root / 'notebooks' / executed_name
+nbformat.write(nb, executed_path)
 errors=sum(o.output_type=='error' for c in nb.cells if c.cell_type=='code' for o in c.outputs)
 print('Notebook executed:',sum(c.cell_type=='code' for c in nb.cells),'cells; errors:',errors)
+print('Executed notebook:', executed_path)

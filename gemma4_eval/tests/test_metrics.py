@@ -85,6 +85,9 @@ def test_gold_with_python_map(trace,make_trace,tmp_path):
     trace['final']['result']['repo']='demo';make_trace(trace)
     e=load_experiment(tmp_path,trace_globs=['model_trace.json']);m=compute_metrics(e,gold_dir=gold,repo_roots={'demo':repo})
     assert val(m,'C05').value==1 and val(m,'C04').value==0 # shell read has no explicit range map
+    wrong=tmp_path/'wrong';wrong.mkdir();(wrong/'lib.py').write_text('def target():\n    return 99\n')
+    task_roots=compute_metrics(e,gold_dir=gold,repo_roots={'demo':wrong,'demo_1':repo})
+    assert val(task_roots,'C05').value==1 # task-specific commit overrides repository fallback
     assert compute_metrics(e,gold_dir=gold).metrics.query("metric_id=='C04'").iloc[0].availability=='unavailable'
 
 

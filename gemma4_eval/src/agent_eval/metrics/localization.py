@@ -87,9 +87,13 @@ def gold_analysis(exp, run, gold_dir, repo_roots):
     agent=exp.patches[exp.patches.run_id==run.run_id].iloc[0]
     agent_files=set(agent.modified_files);gold_files=set(parsed['modified_files'])
     file_rows=[dict(run_id=run.run_id,task_id=run.task_id,file=f,gold=f in gold_files,agent=f in agent_files,symbol=None,viewed=None,edited=None) for f in sorted(agent_files|gold_files)]
-    root=repo_roots.get(run.repo)
+    # Different tasks in one repository can use different base commits.
+    # A task-specific snapshot takes precedence over a shared repository root.
+    root=repo_roots.get(run.task_id) or repo_roots.get(run.repo)
     if not root:
         return None,'Gold file overlap available; function metrics require pristine baseline repo root',file_rows
+    if re.search(r'^\+\s*(?:async\s+)?def\s+',gold,re.M):
+        return None,'Added or renamed gold functions require an explicit symbol correspondence map',file_rows
     # Use original final patch from an audited source pointer, rather than truncated excerpts.
     from ..evidence import read_evidence
     patch_eid=agent.evidence_id
@@ -99,8 +103,6 @@ def gold_analysis(exp, run, gold_dir, repo_roots):
     try:
         if not baseline_matches(root,gold) or agent_patch and not baseline_matches(root,agent_patch):
             return None,'Supplied baseline does not match old-side patch context',file_rows
-        if re.search(r'^\+\s*(?:async\s+)?def\s+',gold,re.M):
-            return None,'Added or renamed gold functions require an explicit symbol correspondence map',file_rows
     except (OSError,ValueError) as exc:
         return None,f'Baseline validation unavailable: {exc}',file_rows
     changes=changed_lines(gold);agent_changes=changed_lines(agent_patch)
