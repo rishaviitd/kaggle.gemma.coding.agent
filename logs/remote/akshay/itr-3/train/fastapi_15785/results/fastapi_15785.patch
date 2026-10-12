@@ -1,0 +1,91 @@
+diff --git a/.scratch/repro.py b/.scratch/repro.py
+new file mode 100644
+index 000000000..a7a5596de
+--- /dev/null
++++ b/.scratch/repro.py
+@@ -0,0 +1,48 @@
++
++from fastapi import FastAPI, APIRouter, Depends
++from fastapi.routing import _EffectiveRouteContext
++
++def test_iter_route_contexts():
++    app = FastAPI()
++    router = APIRouter(prefix="/users", tags=["users"])
++    
++    @router.get("/me")
++    async def read_me():
++        return {"user": "me"}
++    
++    app.include_router(router)
++    
++    # This should fail currently as iter_route_contexts is not implemented
++    contexts = list(app.iter_route_contexts())
++    assert len(contexts) == 1
++    ctx = contexts[0]
++    assert isinstance(ctx, _EffectiveRouteContext)
++    assert ctx.prefix == "/users/me"
++    assert ctx.tags == ["users"]
++
++    # Test with nested router
++    sub_router = APIRouter(prefix="/profile", tags=["profile"])
++    @sub_router.get("/info")
++    async def read_info():
++        return {"info": "info"}
++    
++    router.include_router(sub_router)
++    
++    contexts = list(app.iter_route_contexts())
++    # /users/me and /users/profile/info
++    assert len(contexts) == 2
++    
++    # Find the profile info context
++    profile_ctx = next(ctx for ctx in contexts if ctx.prefix == "/users/profile/info")
++    assert "users" in profile_ctx.tags
++    assert "profile" in profile_ctx.tags
++
++if __name__ == "__main__":
++    try:
++        test_iter_route_contexts()
++        print("Test passed!")
++    except AttributeError as e:
++        print(f"Caught expected AttributeError: {e}")
++    except Exception as e:
++        print(f"Caught unexpected exception: {e}")
++        raise e
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 48c0c2153..7870ef7c2 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -1978,6 +1978,32 @@ class APIRouter(routing.Router):
+         self.strict_content_type = strict_content_type
+         self._routes_version = 0
+ 
++    def iter_route_contexts(self) -> Iterator[_EffectiveRouteContext]:
++        include_context = _RouterIncludeContext(
++            included_router=self,
++            prefix=self.prefix,
++            tags=self.tags,
++            dependencies=self.dependencies,
++            default_response_class=self.default_response_class,
++            responses=self.responses,
++            callbacks=self.callbacks,
++            deprecated=self.deprecated,
++            include_in_schema=self.include_in_schema,
++            generate_unique_id_function=self.generate_unique_id_function,
++            strict_content_type=self.strict_content_type,
++        )
++        temp_included_router = _IncludedRouter(
++            original_router=self,
++            include_context=include_context,
++        )
++        for route, route_context in _iter_routes_with_context(self.routes):
++            if route_context is not None:
++                yield route_context
++            else:
++                ctx = temp_included_router._build_effective_context(route)
++                if ctx:
++                    yield ctx
++
+     def _mark_routes_changed(self) -> None:
+         self._routes_version += 1
+ 

@@ -1,0 +1,121 @@
+diff --git a/.scratch/repro.py b/.scratch/repro.py
+new file mode 100644
+index 00000000..d52faa25
+--- /dev/null
++++ b/.scratch/repro.py
+@@ -0,0 +1,32 @@
++import time
++from fastapi import FastAPI, Response
++from fastapi.testclient import TestClient
++from pydantic import BaseModel
++from datetime import datetime
++
++app = FastAPI()
++
++class Item(BaseModel):
++    name: str
++    timestamp: datetime
++
++@app.get("/item", response_model=Item)
++def get_item():
++    return Item(name="test", timestamp=datetime.now())
++
++client = TestClient(app)
++
++def test_serialization():
++    response = client.get("/item")
++    assert response.status_code == 200
++    assert response.headers["content-type"] == "application/json"
++    # If double serialized, the body would be a JSON string of a JSON string
++    # e.g. '"{\"name\": \"test\", ...}"' instead of '{"name": "test", ...}'
++    import json
++    data = json.loads(response.content)
++    assert isinstance(data, dict)
++    assert data["name"] == "test"
++    print("Serialization test passed!")
++
++if __name__ == "__main__":
++    test_serialization()
+diff --git a/.scratch/repro_encoder.py b/.scratch/repro_encoder.py
+new file mode 100644
+index 00000000..a3c7ac0b
+--- /dev/null
++++ b/.scratch/repro_encoder.py
+@@ -0,0 +1,36 @@
++
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++from pydantic import BaseModel
++from unittest.mock import patch
++
++app = FastAPI()
++
++class Item(BaseModel):
++    name: str
++    price: float
++
++@app.get("/item", response_model=Item)
++async def get_item():
++    return Item(name="Test Item", price=10.5)
++
++client = TestClient(app)
++
++def test_jsonable_encoder_called():
++    with patch("fastapi.routing.jsonable_encoder") as mock_encoder:
++        response = client.get("/item")
++        print(f"Response status: {response.status_code}")
++        if mock_encoder.called:
++            print("jsonable_encoder was called")
++        else:
++            print("jsonable_encoder was NOT called")
++            raise AssertionError("jsonable_encoder was NOT called")
++
++if __name__ == "__main__":
++    try:
++        test_jsonable_encoder_called()
++        print("Test passed!")
++    except Exception as e:
++        import traceback
++        traceback.print_exc()
++        print(f"Test failed: {e}")
+diff --git a/fastapi/_compat/v2.py b/fastapi/_compat/v2.py
+index 0535c806..da03cab1 100644
+--- a/fastapi/_compat/v2.py
++++ b/fastapi/_compat/v2.py
+@@ -188,9 +188,18 @@ class ModelField:
+     ) -> Any:
+         # What calls this code passes a value that already called
+         # self._type_adapter.validate_python(value)
++        if mode == "json":
++            return self._type_adapter.dump_json(
++                value,
++                include=include,
++                exclude=exclude,
++                by_alias=by_alias,
++                exclude_unset=exclude_unset,
++                exclude_defaults=exclude_defaults,
++                exclude_none=exclude_none,
++            )
+         return self._type_adapter.dump_python(
+             value,
+-            mode=mode,
+             include=include,
+             exclude=exclude,
+             by_alias=by_alias,
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index ea82ab14..ba76361f 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -455,7 +455,11 @@ def get_request_handler(
+                     is_coroutine=is_coroutine,
+                     endpoint_ctx=endpoint_ctx,
+                 )
+-                response = actual_response_class(content, **response_args)
++                if isinstance(content, bytes) and issubclass(actual_response_class, JSONResponse):
++                    response = Response(content=content, **response_args)
++                    response.media_type = "application/json"
++                else:
++                    response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+                     response.body = b""
+                 response.headers.raw.extend(solved_result.response.headers.raw)

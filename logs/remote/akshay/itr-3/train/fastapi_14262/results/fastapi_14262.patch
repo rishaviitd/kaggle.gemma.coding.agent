@@ -1,0 +1,124 @@
+diff --git a/.scratch/repro.py b/.scratch/repro.py
+new file mode 100644
+index 00000000..9544b38f
+--- /dev/null
++++ b/.scratch/repro.py
+@@ -0,0 +1,94 @@
++
++from fastapi import FastAPI, Depends, Request, Response
++from fastapi.testclient import TestClient
++import pytest
++from contextlib import asynccontextmanager
++
++app = FastAPI()
++
++# This list will track when events happen
++event_log = []
++
++async def request_scoped_dep():
++    event_log.append("request_dep_start")
++    try:
++        yield "request_val"
++    finally:
++        event_log.append("request_dep_exit")
++
++async def function_scoped_dep():
++    event_log.append("function_dep_start")
++    try:
++        yield "function_val"
++    finally:
++        event_log.append("function_dep_exit")
++
++class LoggedResponse(Response):
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++
++    async def __call__(self, scope, receive, send):
++        event_log.append("response_start")
++        await super().__call__(scope, receive, send)
++        event_log.append("response_end")
++
++@app.get("/")
++async def root(
++    req_val: str = Depends(request_scoped_dep),
++    func_val: str = Depends(function_scoped_dep, scope="function"),
++):
++    event_log.append("function_executed")
++    return LoggedResponse(content="hello")
++
++client = TestClient(app)
++
++def test_dependency_scopes():
++    global event_log
++    event_log = []
++    response = client.get("/")
++    assert response.status_code == 200
++    
++    print(f"Event log: {event_log}")
++    
++    # Expected behavior with scope="function":
++    # 1. request_dep_start
++    # 2. function_dep_start
++    # 3. function_executed
++    # 4. function_dep_exit  <-- Should be BEFORE response_start
++    # 5. response_start
++    # 6. response_end
++    # 7. request_dep_exit   <-- Should be AFTER response_end
++    
++    # Current behavior (without scope="function" support):
++    # 1. request_dep_start
++    # 2. function_dep_start
++    # 3. function_executed
++    # 4. response_start
++    # 5. response_end
++    # 6. function_dep_exit
++    # 7. request_dep_exit
++    
++    # We want to assert that function_dep_exit happens before response_start
++    # and request_dep_exit happens after response_end.
++    
++    try:
++        func_exit_idx = event_log.index("function_dep_exit")
++        resp_start_idx = event_log.index("response_start")
++        resp_end_idx = event_log.index("response_end")
++        req_exit_idx = event_log.index("request_dep_exit")
++        
++        assert func_exit_idx < resp_start_idx, f"function_dep_exit ({func_exit_idx}) should be before response_start ({resp_start_idx})"
++        assert req_exit_idx > resp_end_idx, f"request_dep_exit ({req_exit_idx}) should be after response_end ({resp_end_idx})"
++    except ValueError as e:
++        pytest.fail(f"Missing event in log: {e}")
++
++if __name__ == "__main__":
++    try:
++        test_dependency_scopes()
++        print("Test passed!")
++    except AssertionError as e:
++        print(f"Test failed: {e}")
++        exit(1)
++    except Exception as e:
++        print(f"An error occurred: {e}")
++        exit(1)
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index 418c1172..b498cfed 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -30,6 +30,7 @@ class Dependant:
+     security_scopes_param_name: Optional[str] = None
+     security_scopes: Optional[List[str]] = None
+     use_cache: bool = True
++    scope: str = "request"
+     path: Optional[str] = None
+     cache_key: Tuple[Optional[Callable[..., Any]], Tuple[str, ...]] = field(init=False)
+ 
+diff --git a/fastapi/params.py b/fastapi/params.py
+index 2dc04be1..31150e81 100644
+--- a/fastapi/params.py
++++ b/fastapi/params.py
+@@ -766,6 +766,7 @@ class File(Form):  # type: ignore[misc]
+ class Depends:
+     dependency: Optional[Callable[..., Any]] = None
+     use_cache: bool = True
++    scope: str = "request"
+ 
+ 
+ @dataclass
