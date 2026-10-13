@@ -1,0 +1,145 @@
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..977adeaa 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -128,6 +128,26 @@ def set_cell_size(text: str, total: int) -> str:
+             start = pos
+ 
+ 
++def split_graphemes(text: str) -> list[str]:
++    """Split a string into a list of graphemes."""
++    if not text:
++        return []
++
++    graphemes: list[str] = []
++    current_grapheme = text[0]
++
++    for i in range(1, len(text)):
++        char = text[i]
++        if get_character_cell_size(char) > 0 and text[i - 1] != "\u200d":
++            graphemes.append(current_grapheme)
++            current_grapheme = char
++        else:
++            current_grapheme += char
++
++    graphemes.append(current_grapheme)
++    return graphemes
++
++
+ def chop_cells(
+     text: str,
+     width: int,
+@@ -150,16 +170,16 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
++    for grapheme in split_graphemes(text):
++        cell_width = cell_len(grapheme)
+         char_doesnt_fit = total_width + cell_width > width
+ 
+         if char_doesnt_fit:
+-            append_new_line([character])
++            append_new_line([grapheme])
+             append_to_last_line = lines[-1].append
+             total_width = cell_width
+         else:
+-            append_to_last_line(character)
++            append_to_last_line(grapheme)
+             total_width += cell_width
+ 
+     return ["".join(line) for line in lines]
+diff --git a/rich/text.py b/rich/text.py
+index b57d77c2..a27bff23 100644
+--- a/rich/text.py
++++ b/rich/text.py
+@@ -20,7 +20,7 @@ from ._loop import loop_last
+ from ._pick import pick_bool
+ from ._wrap import divide_line
+ from .align import AlignMethod
+-from .cells import cell_len, set_cell_size
++from .cells import cell_len, set_cell_size, split_graphemes
+ from .containers import Lines
+ from .control import strip_control_codes
+ from .emoji import EmojiVariant
+@@ -195,26 +195,32 @@ class Text(JupyterMixin):
+             return other.plain in self.plain
+         return False
+ 
+-    def __getitem__(self, slice: Union[int, slice]) -> "Text":
+-        def get_text_at(offset: int) -> "Text":
+-            _Span = Span
+-            text = Text(
+-                self.plain[offset],
+-                spans=[
+-                    _Span(0, 1, style)
+-                    for start, end, style in self._spans
+-                    if end > offset >= start
+-                ],
+-                end="",
+-            )
+-            return text
++    def __getitem__(self, key: Union[int, slice]) -> "Text":
++        """Return a slice of the text."""
++        graphemes = split_graphemes(self.plain)
++
++        if isinstance(key, int):
++            # Handle negative index
++            idx = key if key >= 0 else len(graphemes) + key
++            if idx < 0 or idx >= len(graphemes):
++                raise IndexError("Text index out of range")
++
++            # Find codepoint range for this grapheme
++            start = sum(len(g) for g in graphemes[:idx])
++            end = start + len(graphemes[idx])
++
++            # Use a slice to get the Text object for this range
++            return self[slice(start, end)]
+ 
+-        if isinstance(slice, int):
+-            return get_text_at(slice)
+         else:
+-            start, stop, step = slice.indices(len(self.plain))
++            start, stop, step = key.indices(len(graphemes))
+             if step == 1:
+-                lines = self.divide([start, stop])
++                # Convert grapheme indices to codepoint indices
++                cp_start = sum(len(g) for g in graphemes[:start])
++                cp_stop = sum(len(g) for g in graphemes[:stop])
++
++                # Use the existing divide logic with codepoint offsets
++                lines = self.divide([cp_start, cp_stop])
+                 return lines[1]
+             else:
+                 # This would be a bit of work to implement efficiently
+@@ -1185,7 +1191,17 @@ class Text(JupyterMixin):
+ 
+     def right_crop(self, amount: int = 1) -> None:
+         """Remove a number of characters from the end of the text."""
+-        max_offset = len(self.plain) - amount
++        graphemes = split_graphemes(self.plain)
++        if amount >= len(graphemes):
++            self._text = [""]
++            self._spans = []
++            self._length = 0
++            return
++
++        # Calculate the codepoint index of the start of the last 'amount' graphemes
++        max_offset = sum(len(g) for g in graphemes[:-amount])
++        removed_codepoints = len(self.plain) - max_offset
++
+         _Span = Span
+         self._spans[:] = [
+             (
+@@ -1196,8 +1212,8 @@ class Text(JupyterMixin):
+             for span in self._spans
+             if span.start < max_offset
+         ]
+-        self._text = [self.plain[:-amount]]
+-        self._length -= amount
++        self._text = [self.plain[:max_offset]]
++        self._length -= removed_codepoints
+ 
+     def wrap(
+         self,

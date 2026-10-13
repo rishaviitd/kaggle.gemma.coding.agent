@@ -1,0 +1,522 @@
+========================================================================
+TASK: fastapi_14962
+========================================================================
+--- a/docs_src/custom_response/tutorial010_py310.py
++++ b/docs_src/custom_response/tutorial010_py310.py
+@@ -1,9 +1,9 @@
+ from fastapi import FastAPI
+-from fastapi.responses import ORJSONResponse
++from fastapi.responses import HTMLResponse
+ 
+-app = FastAPI(default_response_class=ORJSONResponse)
++app = FastAPI(default_response_class=HTMLResponse)
+ 
+ 
+ @app.get("/items/")
+ async def read_items():
+-    return [{"item_id": "Foo"}]
++    return "<h1>Items</h1><p>This is a list of items.</p>"
+--- a/fastapi/_compat/v2.py
++++ b/fastapi/_compat/v2.py
+@@ -199,6 +199,32 @@ def serialize(
+             exclude_none=exclude_none,
+         )
+ 
++    def serialize_json(
++        self,
++        value: Any,
++        *,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
++        by_alias: bool = True,
++        exclude_unset: bool = False,
++        exclude_defaults: bool = False,
++        exclude_none: bool = False,
++    ) -> bytes:
++        # What calls this code passes a value that already called
++        # self._type_adapter.validate_python(value)
++        # This uses Pydantic's dump_json() which serializes directly to JSON
++        # bytes in one pass (via Rust), avoiding the intermediate Python dict
++        # step of dump_python(mode="json") + json.dumps().
++        return self._type_adapter.dump_json(
++            value,
++            include=include,
++            exclude=exclude,
++            by_alias=by_alias,
++            exclude_unset=exclude_unset,
++            exclude_defaults=exclude_defaults,
++            exclude_none=exclude_none,
++        )
++
+     def __hash__(self) -> int:
+         # Each ModelField is unique for our purposes, to allow making a dict from
+         # ModelField to its JSON Schema.
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -271,6 +271,7 @@ async def serialize_response(
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
+     endpoint_ctx: EndpointContext | None = None,
++    dump_json: bool = False,
+ ) -> Any:
+     if field:
+         if is_coroutine:
+@@ -286,8 +287,8 @@ async def serialize_response(
+                 body=response_content,
+                 endpoint_ctx=ctx,
+             )
+-
+-        return field.serialize(
++        serializer = field.serialize_json if dump_json else field.serialize
++        return serializer(
+             value,
+             include=include,
+             exclude=exclude,
+@@ -443,6 +444,14 @@ async def app(request: Request) -> Response:
+                     response_args["status_code"] = current_status_code
+                 if solved_result.response.status_code:
+                     response_args["status_code"] = solved_result.response.status_code
++                # Use the fast path (dump_json) when no custom response
++                # class was set and a response field with a TypeAdapter
++                # exists. Serializes directly to JSON bytes via Pydantic's
++                # Rust core, skipping the intermediate Python dict +
++                # json.dumps() step.
++                use_dump_json = response_field is not None and isinstance(
++                    response_class, DefaultPlaceholder
++                )
+                 content = await serialize_response(
+                     field=response_field,
+                     response_content=raw_response,
+@@ -454,8 +463,16 @@ async def app(request: Request) -> Response:
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
+                     endpoint_ctx=endpoint_ctx,
++                    dump_json=use_dump_json,
+                 )
+-                response = actual_response_class(content, **response_args)
++                if use_dump_json:
++                    response = Response(
++                        content=content,
++                        media_type="application/json",
++                        **response_args,
++                    )
++                else:
++                    response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+                     response.body = b""
+                 response.headers.raw.extend(solved_result.response.headers.raw)
+
+========================================================================
+TASK: fastapi_15785
+========================================================================
+--- a/fastapi/openapi/utils.py
++++ b/fastapi/openapi/utils.py
+@@ -479,26 +479,22 @@ def get_openapi_path(
+ 
+ 
+ def _get_api_route_for_openapi(
+-    route: BaseRoute, route_context: routing._EffectiveRouteContext | None
++    route_context: routing.RouteContext,
+ ) -> routing._APIRouteLike | None:
+-    if route_context is not None and isinstance(
+-        route_context.original_route, routing.APIRoute
+-    ):
++    if isinstance(route_context.original_route, routing.APIRoute):
+         return cast(routing._APIRouteLike, route_context)
+-    if isinstance(route, routing.APIRoute):
+-        return cast(routing._APIRouteLike, route)
+     return None
+ 
+ 
+ def get_fields_from_routes(
+-    routes: Sequence[BaseRoute],
++    routes: Sequence[BaseRoute | routing.RouteContext],
+ ) -> list[ModelField]:
+     body_fields_from_routes: list[ModelField] = []
+     responses_from_routes: list[ModelField] = []
+     request_fields_from_routes: list[ModelField] = []
+     callback_flat_models: list[ModelField] = []
+-    for route, route_context in routing._iter_routes_with_context(routes):
+-        api_route = _get_api_route_for_openapi(route, route_context)
++    for route_context in routing.iter_route_contexts(routes):
++        api_route = _get_api_route_for_openapi(route_context)
+         if api_route is None:
+             continue
+         if api_route.include_in_schema:
+@@ -531,8 +527,8 @@ def get_openapi(
+     openapi_version: str = "3.1.0",
+     summary: str | None = None,
+     description: str | None = None,
+-    routes: Sequence[BaseRoute],
+-    webhooks: Sequence[BaseRoute] | None = None,
++    routes: Sequence[BaseRoute | routing.RouteContext],
++    webhooks: Sequence[BaseRoute | routing.RouteContext] | None = None,
+     tags: list[dict[str, Any]] | None = None,
+     servers: list[dict[str, str | Any]] | None = None,
+     terms_of_service: str | None = None,
+@@ -567,8 +563,8 @@ def get_openapi(
+         model_name_map=model_name_map,
+         separate_input_output_schemas=separate_input_output_schemas,
+     )
+-    for route, route_context in routing._iter_routes_with_context(routes):
+-        api_route = _get_api_route_for_openapi(route, route_context)
++    for route_context in routing.iter_route_contexts(routes):
++        api_route = _get_api_route_for_openapi(route_context)
+         if api_route is not None:
+             result = get_openapi_path(
+                 route=api_route,
+@@ -587,8 +583,8 @@ def get_openapi(
+                     )
+                 if path_definitions:
+                     definitions.update(path_definitions)
+-    for webhook, webhook_context in routing._iter_routes_with_context(webhooks or []):
+-        api_webhook = _get_api_route_for_openapi(webhook, webhook_context)
++    for webhook_context in routing.iter_route_contexts(webhooks or []):
++        api_webhook = _get_api_route_for_openapi(webhook_context)
+         if api_webhook is not None:
+             result = get_openapi_path(
+                 route=api_webhook,
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -1454,6 +1454,47 @@ def url_path_for(self, name: str, /, **path_params: Any) -> Any:
+         return URLPath(path=path, protocol="http")
+ 
+ 
++@dataclass(frozen=True)
++class RouteContext:
++    route: BaseRoute
++    _route_context: _EffectiveRouteContext | None = field(default=None, repr=False)
++
++    @property
++    def original_route(self) -> BaseRoute:
++        if self._route_context is not None:
++            return self._route_context.original_route
++        return self.route
++
++    @property
++    def _effective_route(self) -> BaseRoute | _EffectiveRouteContext:
++        if self._route_context is not None:
++            return self._route_context
++        return self.route
++
++    @property
++    def path(self) -> str | None:
++        return getattr(self._effective_route, "path", None)
++
++    @property
++    def path_format(self) -> str | None:
++        return getattr(self._effective_route, "path_format", None)
++
++    @property
++    def name(self) -> str | None:
++        return getattr(self._effective_route, "name", None)
++
++    @property
++    def methods(self) -> set[str] | None:
++        return getattr(self._effective_route, "methods", None)
++
++    @property
++    def endpoint(self) -> Callable[..., Any] | None:
++        return getattr(self._effective_route, "endpoint", None)
++
++    def __getattr__(self, name: str) -> Any:
++        return getattr(self._effective_route, name)
++
++
+ @dataclass
+ class _IncludedRouter(BaseRoute):
+     original_router: "APIRouter"
+@@ -1654,6 +1695,20 @@ def _iter_included_route_candidates(routes: Sequence[BaseRoute]) -> Iterator[Bas
+             yield route
+ 
+ 
++def iter_route_contexts(
++    routes: Sequence[BaseRoute | RouteContext],
++) -> Iterator[RouteContext]:
++    for route in routes:
++        if isinstance(route, RouteContext):
++            yield route
++            continue
++        for original_route, route_context in _iter_routes_with_context([route]):
++            if route_context is None:
++                yield RouteContext(original_route)
++            else:
++                yield RouteContext(original_route, route_context)
++
++
+ def _iter_routes_with_context(
+     routes: Sequence[BaseRoute],
+ ) -> Iterator[tuple[BaseRoute, _EffectiveRouteContext | None]]:
+
+========================================================================
+TASK: requests_6589
+========================================================================
+--- a/src/requests/utils.py
++++ b/src/requests/utils.py
+@@ -134,6 +134,9 @@ def super_len(o):
+     total_length = None
+     current_position = 0
+ 
++    if isinstance(o, str):
++        o = o.encode("utf-8")
++
+     if hasattr(o, "__len__"):
+         total_length = len(o)
+ 
+
+========================================================================
+TASK: requests_6592
+========================================================================
+--- a/src/requests/status_codes.py
++++ b/src/requests/status_codes.py
+@@ -79,7 +79,7 @@
+     422: ("unprocessable_entity", "unprocessable"),
+     423: ("locked",),
+     424: ("failed_dependency", "dependency"),
+-    425: ("unordered_collection", "unordered"),
++    425: ("unordered_collection", "unordered", "too_early"),
+     426: ("upgrade_required", "upgrade"),
+     428: ("precondition_required", "precondition"),
+     429: ("too_many_requests", "too_many"),
+
+========================================================================
+TASK: requests_7505
+========================================================================
+--- a/src/requests/_types.py
++++ b/src/requests/_types.py
+@@ -29,6 +29,11 @@ class SupportsRead(Protocol[_T_co]):
+     def read(self, length: int = ..., /) -> _T_co: ...
+ 
+ 
++def has_read(obj: Any) -> TypeIs[SupportsRead[str | bytes]]:
++    """Check if obj supports read, including __getattr__ based proxies."""
++    return isinstance(obj, SupportsRead) or hasattr(obj, "read")
++
++
+ @runtime_checkable
+ class SupportsItems(Protocol[_KT_co, _VT_co]):
+     def items(self) -> Iterable[tuple[_KT_co, _VT_co]]: ...
+--- a/src/requests/models.py
++++ b/src/requests/models.py
+@@ -35,8 +35,8 @@
+ from urllib3.filepost import encode_multipart_formdata
+ from urllib3.util import parse_url
+ 
++from . import _types as _t
+ from ._internal_utils import to_native_string, unicode_is_ascii
+-from ._types import SupportsRead as _SupportsRead
+ from .auth import HTTPBasicAuth
+ from .compat import (
+     JSONDecodeError,
+@@ -87,7 +87,6 @@
+ 
+     from typing_extensions import Self
+ 
+-    from . import _types as _t
+     from .adapters import HTTPAdapter
+     from .cookies import RequestsCookieJar
+ 
+@@ -161,7 +160,7 @@ def _encode_params(
+ 
+         if isinstance(data, (str, bytes)):
+             return data
+-        elif isinstance(data, _SupportsRead):
++        elif _t.has_read(data):
+             return data
+         elif hasattr(data, "__iter__"):
+             result: list[tuple[bytes, bytes]] = []
+@@ -236,9 +235,7 @@ def _encode_files(
+ 
+             if isinstance(fp, (str, bytes, bytearray)):
+                 fdata = fp
+-            # data that proxies attributes to underlying objects needs hasattr
+-            # defensive check for untyped callers
+-            elif isinstance(fp, _SupportsRead) or hasattr(fp, "read"):
++            elif _t.has_read(fp):
+                 fdata = fp.read()
+             elif fp is None:  # defensive check for untyped callers
+                 continue
+@@ -641,7 +638,7 @@ def prepare_body(
+             else:
+                 if raw_data:
+                     body = self._encode_params(raw_data)
+-                    if isinstance(data, basestring) or isinstance(data, _SupportsRead):
++                    if isinstance(data, basestring) or _t.has_read(data):
+                         content_type = None
+                     else:
+                         content_type = "application/x-www-form-urlencoded"
+
+========================================================================
+TASK: rich_3064
+========================================================================
+--- a/rich/markdown.py
++++ b/rich/markdown.py
+@@ -254,15 +254,14 @@ def __rich_console__(
+     ) -> RenderResult:
+         table = Table(box=box.SIMPLE_HEAVY)
+ 
+-        assert self.header is not None
+-        assert self.header.row is not None
+-        for column in self.header.row.cells:
+-            table.add_column(column.content)
+-
+-        assert self.body is not None
+-        for row in self.body.rows:
+-            row_content = [element.content for element in row.cells]
+-            table.add_row(*row_content)
++        if self.header is not None and self.header.row is not None:
++            for column in self.header.row.cells:
++                table.add_column(column.content)
++
++        if self.body is not None:
++            for row in self.body.rows:
++                row_content = [element.content for element in row.cells]
++                table.add_row(*row_content)
+ 
+         yield table
+ 
+
+========================================================================
+TASK: rich_3130
+========================================================================
+--- a/rich/markdown.py
++++ b/rich/markdown.py
+@@ -314,7 +314,7 @@ class TableDataElement(MarkdownElement):
+ 
+     @classmethod
+     def create(cls, markdown: "Markdown", token: Token) -> "MarkdownElement":
+-        style = str(token.attrs.get("style" "")) or ""
++        style = str(token.attrs.get("style")) or ""
+ 
+         justify: JustifyMethod
+         if "text-align:right" in style:
+@@ -330,15 +330,13 @@ def create(cls, markdown: "Markdown", token: Token) -> "MarkdownElement":
+         return cls(justify=justify)
+ 
+     def __init__(self, justify: JustifyMethod) -> None:
+-        self.content: TextType = ""
++        self.content: Text = Text("", justify=justify)
+         self.justify = justify
+ 
+     def on_text(self, context: "MarkdownContext", text: TextType) -> None:
+-        plain = text.plain if isinstance(text, Text) else text
+-        style = text.style if isinstance(text, Text) else ""
+-        self.content = Text(
+-            plain, justify=self.justify, style=context.style_stack.current
+-        )
++        text = Text(text) if isinstance(text, str) else text
++        text.stylize(context.current_style)
++        self.content.append_text(text)
+ 
+ 
+ class ListElement(MarkdownElement):
+
+========================================================================
+TASK: rich_3469
+========================================================================
+--- a/rich/markdown.py
++++ b/rich/markdown.py
+@@ -677,7 +677,7 @@ def __rich_console__(
+                         and context.stack.top.on_child_close(context, element)
+                     )
+                     if should_render:
+-                        if new_line:
++                        if new_line and node_type != "inline":
+                             yield _new_line_segment
+                         yield from console.render(element, context.options)
+ 
+
+========================================================================
+TASK: rich_3782
+========================================================================
+--- a/rich/syntax.py
++++ b/rich/syntax.py
+@@ -1,3 +1,5 @@
++from __future__ import annotations
++
+ import os.path
+ import re
+ import sys
+@@ -224,6 +226,17 @@ class _SyntaxHighlightRange(NamedTuple):
+     style_before: bool = False
+ 
+ 
++class PaddingProperty:
++    """Descriptor to get and set padding."""
++
++    def __get__(self, obj: Syntax, objtype: Type[Syntax]) -> Tuple[int, int, int, int]:
++        """Space around the Syntax."""
++        return obj._padding
++
++    def __set__(self, obj: Syntax, padding: PaddingDimensions) -> None:
++        obj._padding = Padding.unpack(padding)
++
++
+ class Syntax(JupyterMixin):
+     """Construct a Syntax object to render syntax highlighted code.
+ 
+@@ -293,11 +306,13 @@ def __init__(
+             Style(bgcolor=background_color) if background_color else Style()
+         )
+         self.indent_guides = indent_guides
+-        self.padding = padding
++        self._padding = Padding.unpack(padding)
+ 
+         self._theme = self.get_theme(theme)
+         self._stylized_ranges: List[_SyntaxHighlightRange] = []
+ 
++    padding = PaddingProperty()
++
+     @classmethod
+     def from_path(
+         cls,
+@@ -371,8 +386,8 @@ def guess_lexer(cls, path: str, code: Optional[str] = None) -> str:
+         is supplied, the lexer will be chosen based on the file extension..
+ 
+         Args:
+-             path (AnyStr): The path to the file containing the code you wish to know the lexer for.
+-             code (str, optional): Optional string of code that will be used as a fallback if no lexer
++            path (AnyStr): The path to the file containing the code you wish to know the lexer for.
++            code (str, optional): Optional string of code that will be used as a fallback if no lexer
+                 is found for the supplied path.
+ 
+         Returns:
+@@ -607,7 +622,7 @@ def _get_number_styles(self, console: Console) -> Tuple[Style, Style, Style]:
+     def __rich_measure__(
+         self, console: "Console", options: "ConsoleOptions"
+     ) -> "Measurement":
+-        _, right, _, left = Padding.unpack(self.padding)
++        _, right, _, left = self.padding
+         padding = left + right
+         if self.code_width is not None:
+             width = self.code_width + self._numbers_column_width + padding + 1
+@@ -626,7 +641,7 @@ def __rich_console__(
+         self, console: Console, options: ConsoleOptions
+     ) -> RenderResult:
+         segments = Segments(self._get_syntax(console, options))
+-        if self.padding:
++        if any(self.padding):
+             yield Padding(segments, style=self._get_base_style(), pad=self.padding)
+         else:
+             yield segments
+@@ -640,15 +655,19 @@ def _get_syntax(
+         Get the Segments for the Syntax object, excluding any vertical/horizontal padding
+         """
+         transparent_background = self._get_base_style().transparent_background
++        _pad_top, pad_right, _pad_bottom, pad_left = self.padding
++        horizontal_padding = pad_left + pad_right
+         code_width = (
+             (
+                 (options.max_width - self._numbers_column_width - 1)
+                 if self.line_numbers
+                 else options.max_width
+             )
++            - horizontal_padding
+             if self.code_width is None
+             else self.code_width
+         )
++        code_width = max(0, code_width)
+ 
+         ends_on_nl, processed_code = self._process_code(self.code)
+         text = self.highlight(processed_code, self.line_range)
+

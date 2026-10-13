@@ -1,0 +1,139 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..b9bc0b49 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,30 +155,35 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(self, errors: Sequence[Any], *, context: Optional[str] = None) -> None:
+         self._errors = errors
++        self.context = context
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self.context:
++            message += f"\n{self.context}\n"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, context: Optional[str] = None) -> None:
++        super().__init__(errors, context=context)
+         self.body = body
+ 
+ 
+ class WebSocketRequestValidationError(ValidationException):
+-    pass
++    def __init__(self, errors: Sequence[Any], *, context: Optional[str] = None) -> None:
++        super().__init__(errors, context=context)
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, context: Optional[str] = None) -> None:
++        super().__init__(errors, context=context)
+         self.body = body
+ 
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..ee7db014 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -51,6 +51,8 @@ from fastapi.exceptions import (
+     ResponseValidationError,
+     WebSocketRequestValidationError,
+ )
++from fastapi.utils import get_endpoint_context
++
+ from fastapi.types import DecoratedCallable, IncEx
+ from fastapi.utils import (
+     create_cloned_field,
+@@ -300,8 +302,10 @@ def get_request_handler(
+     response_model_exclude_none: bool = False,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    route: Optional[APIRoute] = None,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
++    context = get_endpoint_context(dependant, route)
+     is_coroutine = dependant.is_coroutine_callable
+     is_body_form = body_field and isinstance(
+         body_field.field_info, (params.Form, temp_pydantic_v1_params.Form)
+@@ -355,6 +359,7 @@ def get_request_handler(
+                     }
+                 ],
+                 body=e.doc,
++                context=context,
+             )
+             raise validation_error from e
+         except HTTPException:
+diff --git a/fastapi/utils.py b/fastapi/utils.py
+index b3b89ed2..a5e65e4f 100644
+--- a/fastapi/utils.py
++++ b/fastapi/utils.py
+@@ -1,12 +1,15 @@
++import inspect
+ import re
+ import warnings
+ from dataclasses import is_dataclass
+ from typing import (
+     TYPE_CHECKING,
+     Any,
++    Callable,
+     Dict,
+     MutableMapping,
+     Optional,
++    Sequence,
+     Set,
+     Type,
+     Union,
+@@ -14,7 +17,6 @@ from typing import (
+ )
+ from weakref import WeakKeyDictionary
+ 
+-import fastapi
+ from fastapi._compat import (
+     PYDANTIC_V2,
+     BaseConfig,
+@@ -40,6 +42,27 @@ _CLONED_TYPES_CACHE: MutableMapping[Type[BaseModel], Type[BaseModel]] = (
+     WeakKeyDictionary()
+ )
+ 
++# Cache for endpoint context
++_endpoint_context_cache: Dict[Callable[..., Any], str] = {}
++
++
++def get_endpoint_context(call: Callable[..., Any], methods: Sequence[str], path: str) -> str:
++    if call in _endpoint_context_cache:
++        return _endpoint_context_cache[call]
++
++    try:
++        unwrapped = inspect.unwrap(call)
++        file = inspect.getfile(unwrapped)
++        line = inspect.getlineno(unwrapped)
++        name = unwrapped.__name__
++        method = methods[0] if methods else "UNKNOWN"
++        context = f"File {file}, line {line}, in {name}\n    {method} {path}"
++    except Exception:
++        context = ""
++
++    _endpoint_context_cache[call] = context
++    return context
++
+ 
+ def is_body_allowed_for_status_code(status_code: Union[int, str, None]) -> bool:
+     if status_code is None:

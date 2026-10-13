@@ -1,0 +1,109 @@
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 00000000..1e8c65f1
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,17 @@
++from rich.text import Text
++from rich.console import Console
++
++console = Console(force_terminal=True)
++
++text = Text("Hello\tWorld", style="white")
++text.stylize("red", 0, 6) # "Hello\t" should be red
++text.expand_tabs(8)
++
++print(f"Text: {text.plain}")
++print(f"Spans: {text._spans}")
++
++expected_span = (0, 8, "red")
++if any(s == expected_span for s in text._spans):
++    print("SUCCESS")
++else:
++    print("FAILURE")
+diff --git a/repro_style.py b/repro_style.py
+new file mode 100644
+index 00000000..b841ee46
+--- /dev/null
++++ b/repro_style.py
+@@ -0,0 +1,45 @@
++from rich.text import Text
++from rich.console import Console
++from rich.style import Style
++
++def test_expand_tabs_style():
++    console = Console(force_terminal=True)
++    
++    # Base style: white on black
++    # Text with a tab that has a red style
++    text = Text("Hello\tWorld", style="white")
++    text.stylize(Style.parse("red"), start=0, end=6)
++    
++    # Before expansion
++    # "Hello\t" is red, "World" is white
++    
++    text.expand_tabs(tab_size=8)
++    
++    # After expansion:
++    # "Hello   " (tab expanded to 3 spaces) should be red
++    # "World" should be white
++    
++    # We can verify this by checking the spans
++    # Original length: 11 (Hello\tWorld)
++    # Expanded length: 13 (Hello   World)
++    
++    print(f"Expanded text: {text.plain}")
++    print(f"Spans: {text._spans}")
++    
++    # The span for "Hello   " should be from 0 to 8 and be red.
++    # Wait, "Hello" is 5 chars, tab expands to 3 spaces. Total 8.
++    # So spans should have (0, 8, Style('red'))
++    
++    found_red_span = False
++    for start, end, style in text._spans:
++        if start == 0 and end == 8 and style == Style("red"):
++            found_red_span = True
++            break
++    
++    if found_red_span:
++        print("SUCCESS: Style preserved!")
++    else:
++        print("FAILURE: Style lost!")
++
++if __name__ == "__main__":
++    test_expand_tabs_style()
+diff --git a/rich/text.py b/rich/text.py
+index c534b3b1..ff753142 100644
+--- a/rich/text.py
++++ b/rich/text.py
+@@ -793,12 +793,26 @@ class Text(JupyterMixin):
+             parts = line.split("\t", include_separator=True)
+             for part in parts:
+                 if part.plain.endswith("\t"):
+-                    part._text = [part.plain[:-1] + " "]
+-                    append(part)
+-                    pos += len(part)
++                    # Determine the style of the tab character for the additional spaces
++                    tab_style = part.style
++                    if isinstance(tab_style, str):
++                        tab_style = Style.parse(tab_style)
++                    for start, end, span_style in part._spans:
++                        if end > len(part) - 1 >= start:
++                            s = span_style
++                            if isinstance(s, str):
++                                s = Style.parse(s)
++                            tab_style += s
++
++                    # Replace the tab with a space and preserve other styles
++                    plain = part.plain[:-1] + " "
++                    tab_part = Text(plain, style=part.style)
++                    tab_part._spans = list(part._spans)
++                    append(tab_part)
++                    pos += len(tab_part)
+                     spaces = tab_size - ((pos - 1) % tab_size) - 1
+                     if spaces:
+-                        append(" " * spaces, _style)
++                        append(" " * spaces, tab_style)
+                         pos += spaces
+                 else:
+                     append(part)

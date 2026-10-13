@@ -41,7 +41,8 @@ def next_job(
     return pending[0] if pending else None
 
 
-def open_terminal(person: str, iteration: str, api_base: str, exit_path: Path, pid_path: Path) -> None:
+def open_terminal(person: str, iteration: str, provider: str, model: str,
+                  api_base: str | None, exit_path: Path, pid_path: Path) -> None:
     """Open a new Terminal window and record the pipeline exit code when it ends.
 
     Terminal keeps its own shell open after `do script`, so the exit code is
@@ -52,7 +53,7 @@ def open_terminal(person: str, iteration: str, api_base: str, exit_path: Path, p
         if path.exists():
             path.unlink()
     script_path = exit_path.with_suffix(".command")
-    pipeline = " ".join(shlex.quote(part) for part in command(person, iteration, api_base))
+    pipeline = " ".join(shlex.quote(part) for part in command(person, iteration, provider, model, api_base))
     script_path.write_text(
         "#!/bin/zsh\n"
         "set +e\n"
@@ -97,26 +98,34 @@ def process_alive(pid_path: Path) -> bool | None:
     return True
 
 
-def command(person: str, iteration: str, api_base: str) -> list[str]:
-    return [
+def command(person: str, iteration: str, provider: str, model: str,
+            api_base: str | None) -> list[str]:
+    args = [
         str(PYTHON),
         str(PIPELINE),
         "--train",
         "--all",
         "--submission",
         f"src/{person}/{iteration}",
-        "--api-base",
-        api_base,
+        "--provider",
+        provider,
+        "--model",
+        model,
         "--skip-langfuse",
         "--resume",
     ]
+    if api_base:
+        args.extend(("--api-base", api_base))
+    return args
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True, help="JSON object of person to iteration list")
     parser.add_argument("--slots", type=int, default=2)
-    parser.add_argument("--api-base", default="http://127.0.0.1:18001/v1")
+    parser.add_argument("--provider", default=os.getenv("MODEL_PROVIDER", "vllm"))
+    parser.add_argument("--model", default=os.getenv("MODEL_NAME", "gemma4"))
+    parser.add_argument("--api-base", help="Optional provider API base override")
     args = parser.parse_args()
     if args.slots < 1:
         raise SystemExit("--slots must be at least 1")
@@ -151,7 +160,8 @@ def main() -> None:
             exit_path = run_dir / f"{iteration}.exit"
             pid_path = run_dir / f"{iteration}.pid"
             try:
-                open_terminal(person, iteration, args.api_base, exit_path, pid_path)
+                open_terminal(person, iteration, args.provider, args.model, args.api_base,
+                              exit_path, pid_path)
             except (OSError, subprocess.CalledProcessError) as error:
                 pending.remove(job)
                 failures.append((person, iteration, 1))

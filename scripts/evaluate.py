@@ -7,10 +7,11 @@ import time
 import tempfile
 from pathlib import Path
 
+from adk_submission import ModelRegistry
 from swegemma.config import EvalConfig
 from swegemma.evaluate import Evaluator
 from swegemma.harness.verification import verify_task
-from swegemma.models import load_tasks, setup_gemma_model_registry
+from swegemma.models import load_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,7 +52,7 @@ async def main():
         graph_dir=str(ROOT / 'data/assets/graph'),
         embeddings_dir=str(ROOT / 'data/assets/embeddings'),
         wheels_dir=ROOT / 'data/assets/task_wheels' / args.task_id,
-        models=setup_gemma_model_registry(),
+        models=ModelRegistry(),
         task_ids=[args.task_id],
         sandbox='docker',
         image='swebench-sandbox:latest',

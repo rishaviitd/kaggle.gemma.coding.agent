@@ -1,4 +1,4 @@
-"""Capture exact OpenAI-compatible requests and responses sent to vLLM."""
+"""Capture model requests and responses sent through LiteLLM."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 
 class VllmTraceProxy:
-    """Local transparent proxy that records chat-completion exchanges."""
+    """Local transparent proxy that records provider-native model exchanges."""
 
     def __init__(self, upstream_base: str) -> None:
         self.upstream_base = upstream_base.rstrip('/')
@@ -24,7 +24,9 @@ class VllmTraceProxy:
     @property
     def api_base(self) -> str:
         assert self._server is not None
-        return f'http://127.0.0.1:{self._server.server_port}/v1'
+        # Providers append different native endpoint paths. Keep the proxy at
+        # its root so OpenAI, Anthropic, and Gemini paths all forward intact.
+        return f'http://127.0.0.1:{self._server.server_port}'
 
     def start(self) -> None:
         proxy = self
@@ -59,13 +61,12 @@ class VllmTraceProxy:
                     response_headers = {'Content-Type': 'application/json'}
                     response_body = json.dumps({'error': str(error)}).encode()
 
-                if self.path.rstrip('/').endswith('/chat/completions'):
-                    with proxy._lock:
-                        proxy.exchanges.append({
-                            'request': _decode_json(request_body),
-                            'response_status': status,
-                            'response': _decode_json(response_body),
-                        })
+                with proxy._lock:
+                    proxy.exchanges.append({
+                        'request': _decode_json(request_body),
+                        'response_status': status,
+                        'response': _decode_json(response_body),
+                    })
 
                 self.send_response(status)
                 for key, value in response_headers.items():
@@ -97,7 +98,7 @@ class VllmTraceProxy:
         for index, exchange in enumerate(self.exchanges, start=1):
             request = exchange['request'] if isinstance(exchange['request'], dict) else {}
             response = exchange['response'] if isinstance(exchange['response'], dict) else {}
-            message = ((response.get('choices') or [{}])[0].get('message') or {})
+            message = _assistant_message(response)
             tool_calls = _normalize_tool_calls(message.get('tool_calls', []))
             system_text = _system_text(request)
             later_requests = [
@@ -139,7 +140,33 @@ def _system_text(request: dict[str, Any]) -> str:
             continue
         content = message.get('content')
         return content if isinstance(content, str) else json.dumps(content)
-    return ''
+    system = request.get('system')
+    return system if isinstance(system, str) else ''
+
+
+def _assistant_message(response: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the common OpenAI, Anthropic, and Gemini response shapes."""
+    if choices := response.get('choices'):
+        return choices[0].get('message') or {}
+    if isinstance(response.get('content'), list):
+        content = response['content']
+        text = ''.join(item.get('text', '') for item in content if item.get('type') == 'text')
+        calls = [
+            {'id': item.get('id'), 'type': 'function',
+             'function': {'name': item.get('name'), 'arguments': json.dumps(item.get('input', {}))}}
+            for item in content if item.get('type') == 'tool_use'
+        ]
+        return {'content': text or None, 'reasoning': response.get('thinking'), 'tool_calls': calls}
+    candidates = response.get('candidates') or []
+    parts = ((candidates[0].get('content') or {}).get('parts') or []) if candidates else []
+    text = ''.join(part.get('text', '') for part in parts if isinstance(part, dict))
+    calls = [
+        {'id': None, 'type': 'function',
+         'function': {'name': part['functionCall'].get('name'),
+                      'arguments': json.dumps(part['functionCall'].get('args', {}))}}
+        for part in parts if isinstance(part, dict) and isinstance(part.get('functionCall'), dict)
+    ]
+    return {'content': text or None, 'tool_calls': calls}
 
 
 def _decode_json(body: bytes) -> Any:

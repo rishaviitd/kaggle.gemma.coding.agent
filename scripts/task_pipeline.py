@@ -1,27 +1,95 @@
-"""Run a local SWE task using a remote OpenAI-compatible model server."""
+"""Run a local SWE task using vLLM or an external LiteLLM provider."""
 import argparse
 import asyncio
 import csv
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 import litellm
-import requests
 import yaml
+from adk_submission import ModelRegistry
 from google.adk.apps._configs import EventsCompactionConfig
+from google.adk.models.lite_llm import LiteLlm
 from swegemma.config import EvalConfig
 from swegemma.evaluate import Evaluator
 from swegemma.harness.container_setup import _is_wheel_compatible_py313
-from swegemma.models import load_tasks, setup_gemma_model_registry
+from swegemma.models import load_tasks
 
 from langfuse_bridge import push_to_langfuse
 from vllm_trace_proxy import VllmTraceProxy
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+PROVIDERS = {
+    'vllm': {
+        'prefix': 'openai',
+        'key_envs': ('VLLM_API_KEY', 'VLLMAPI_KEY'),
+        'base_env': 'LOCAL_INFERENCE_URL',
+        'default_base': 'http://127.0.0.1:18001/v1',
+    },
+    'openai': {
+        'prefix': 'openai',
+        'key_envs': ('OPENAI_API_KEY',),
+        'base_env': 'OPENAI_API_BASE',
+        'default_base': 'https://api.openai.com/v1',
+    },
+    'anthropic': {
+        'prefix': 'anthropic',
+        'key_envs': ('ANTHROPIC_API_KEY',),
+        'base_env': 'ANTHROPIC_API_BASE',
+        'default_base': 'https://api.anthropic.com',
+    },
+    'gemini': {
+        'prefix': 'gemini',
+        'key_envs': ('GEMINI_API_KEY', 'GOOGLE_API_KEY'),
+        'base_env': 'GEMINI_API_BASE',
+        'default_base': 'https://generativelanguage.googleapis.com',
+    },
+}
+
+
+def configured_model(provider: str, model: str) -> str:
+    """Return the LiteLLM model identifier for an explicit provider/model pair."""
+    if '/' in model:
+        model_provider, _, _ = model.partition('/')
+        if model_provider != PROVIDERS[provider]['prefix']:
+            raise ValueError(
+                f'--model provider prefix {model_provider!r} conflicts with --provider {provider!r}'
+            )
+        return model
+    return f"{PROVIDERS[provider]['prefix']}/{model}"
+
+
+def provider_key(provider: str) -> str:
+    """Read the configured provider key, accepting Google API key aliases."""
+    for env_name in PROVIDERS[provider]['key_envs']:
+        if value := os.getenv(env_name):
+            return value
+    names = ' or '.join(PROVIDERS[provider]['key_envs'])
+    raise ValueError(f'Set {names} in .env')
+
+
+def build_model_registry(api_base: str, api_key: str, model: str,
+                         agent_dir: Path) -> ModelRegistry:
+    """Register the serving name and submission-declared aliases locally."""
+    models = ModelRegistry()
+    aliases = {model}
+    for config_path in agent_dir.rglob('*.yaml'):
+        match = re.search(r'^model:\s*([^\s#]+)', config_path.read_text(), re.MULTILINE)
+        if match:
+            aliases.add(match.group(1).strip('"\''))
+    for alias in aliases:
+        models.register(alias, LiteLlm(
+            model=model, api_base=api_base, api_key=api_key,
+            num_retries=2,
+        ))
+    return models
 
 
 def arguments():
@@ -50,9 +118,15 @@ def arguments():
     p.add_argument('--wheels', type=Path, help='Override the task wheel-cache path.')
     p.add_argument('--submission', type=Path,
                    help='Agent directory under src/, for example src/rishav/itr-1.')
-    # p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'https://legacy-repeal-vowed.ngrok-free.dev/v1/'))
-    p.add_argument('--api-base', default=os.getenv('LOCAL_INFERENCE_URL', 'http://127.0.0.1:18001/v1'))
-    p.add_argument('--model', default='gemma4')
+    p.add_argument('--run-name',
+                   help='Unique log subdirectory for this parameter run, e.g. itr-1-temp-1.')
+    p.add_argument('--provider', choices=tuple(PROVIDERS),
+                   default=os.getenv('MODEL_PROVIDER', 'vllm'),
+                   help='LiteLLM provider (default: MODEL_PROVIDER or vllm).')
+    p.add_argument('--model', default=os.getenv('MODEL_NAME', 'gemma4'),
+                   help='Provider model name, for example gpt-4.1 or claude-sonnet-4-5.')
+    p.add_argument('--api-base',
+                   help='Provider API base; defaults to the selected provider environment variable.')
     p.add_argument('--iteration', type=int, default=1,
                    help='Positive experiment number used in Langfuse task names.')
     p.add_argument('--max-tool-calls', type=int,
@@ -65,11 +139,23 @@ def arguments():
                    help='Override max_turns from the submission eval config.')
     p.add_argument('--max-output-tokens', type=int,
                    help='Override max_output_tokens from the submission sampling config.')
+    p.add_argument('--temperature', type=float,
+                   help='Override temperature from the submission sampling config.')
     p.add_argument('--skip-langfuse', action='store_true',
                    help='Do not upload the completed local trace even when Langfuse is configured.')
     p.add_argument('--langfuse-session-id',
                    help='Override the generated Langfuse session ID for this run.')
     args = p.parse_args()
+    provider_config = PROVIDERS[args.provider]
+    args.api_base = (
+        args.api_base
+        or os.getenv(provider_config['base_env'])
+        or provider_config['default_base']
+    )
+    try:
+        args.litellm_model = configured_model(args.provider, args.model)
+    except ValueError as error:
+        p.error(str(error))
     split_dir = ROOT / 'data' / args.split
     args.tasks = args.tasks or split_dir / 'tasks.jsonl'
     if args.iteration < 1:
@@ -109,7 +195,12 @@ def arguments():
         args.max_turns if args.max_turns is not None
         else evaluation.get('max_turns')
     )
-    args.logs = ROOT / 'logs' / 'remote' / submission_name / args.split
+    log_name = str(submission_name)
+    if args.run_name:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', args.run_name):
+            p.error('--run-name may contain only letters, numbers, dots, underscores, and hyphens')
+        log_name = str(submission_name / args.run_name)
+    args.logs = ROOT / 'logs' / 'remote' / log_name / args.split
 
     manifest = split_dir / 'manifest.csv'
     if manifest.is_file():
@@ -178,20 +269,26 @@ def arguments():
 
 
 def preflight_model(args, key):
-    response = requests.post(
-        args.api_base.rstrip('/') + '/chat/completions',
-        headers={'Authorization': f'Bearer {key}', 'ngrok-skip-browser-warning': '1'},
-        json={'model': args.model, 'messages': [{'role': 'user', 'content': 'Reply OK.'}],
-              'tools': [{'type': 'function', 'function': {
-                  'name': 'get_status', 'description': 'Get workspace status',
-                  'parameters': {'type': 'object', 'properties': {}}}}],
-              'tool_choice': 'auto', 'max_tokens': 32,
-              'chat_template_kwargs': {'enable_thinking': False}},
-        timeout=120,
-    )
-    if not response.ok:
-        raise RuntimeError(f'Model tool-calling preflight failed (HTTP {response.status_code}): '
-                           f'{response.text[:600]}')
+    request = {
+        'model': args.litellm_model,
+        'messages': [{'role': 'user', 'content': 'Reply OK.'}],
+        'tools': [{'type': 'function', 'function': {
+            'name': 'get_status', 'description': 'Get workspace status',
+            'parameters': {'type': 'object', 'properties': {}}}}],
+        'tool_choice': 'auto',
+        'max_tokens': 32,
+        'api_base': args.api_base,
+        'api_key': key,
+        'timeout': 120,
+    }
+    if args.provider == 'vllm':
+        request['chat_template_kwargs'] = {'enable_thinking': False}
+    try:
+        litellm.completion(**request)
+    except Exception as error:
+        raise RuntimeError(
+            f'Model tool-calling preflight failed for {args.litellm_model}: {error}'
+        ) from error
 
 
 def prepare_agent(args, agent_dir):
@@ -201,6 +298,8 @@ def prepare_agent(args, agent_dir):
         path.write_text(''.join(line for line in lines if not line.startswith('adapter:')))
     sampling_path = agent_dir / 'configs/sampling.yaml'
     sampling = yaml.safe_load(sampling_path.read_text()) or {}
+    if args.temperature is not None:
+        sampling['temperature'] = args.temperature
     if args.max_output_tokens is not None:
         sampling['max_output_tokens'] = args.max_output_tokens
     else:
@@ -213,6 +312,11 @@ def print_run_config(args, agent_dir):
     sampling = yaml.safe_load(sampling_path.read_text()) or {}
     thinking = sampling.get('thinking_config') or {}
     default = '<framework default>'
+    print(
+        f'Model config: provider={args.provider}, model={args.litellm_model}, '
+        f'api_base={args.api_base}',
+        flush=True,
+    )
     print(
         'Sampling config: '
         f"temperature={sampling.get('temperature', default)}, "
@@ -258,8 +362,7 @@ async def run_one(args, working, agent_dir, key, task, index, total):
         tasks_path=args.tasks, snapshots_dir=snapshots, submission_dir=agent_dir,
         results_dir=task_logs, graph_dir=str(graph.parent),
         embeddings_dir=str(embeddings.parent), wheels_dir=wheels,
-        models=setup_gemma_model_registry(api_base=proxy.api_base, api_key=key,
-                                         served_model=args.model, num_retries=2),
+        models=build_model_registry(proxy.api_base, key, args.litellm_model, agent_dir),
         task_ids=[task.instance_id], sandbox='docker', image='swebench-sandbox:latest',
         max_tool_calls=args.max_tool_calls, max_time_minutes=args.max_minutes,
         timeout_seconds=args.timeout_seconds, max_turns=args.max_turns,
@@ -269,7 +372,7 @@ async def run_one(args, working, agent_dir, key, task, index, total):
             event_retention_size=5),
     )
     task_results.mkdir(parents=True, exist_ok=True)
-    print(f'[{index}/{total}] Running {task.instance_id} with remote model {args.model}; '
+    print(f'[{index}/{total}] Running {task.instance_id} with {args.litellm_model}; '
           'workspaces/tests run locally.', flush=True)
     try:
         result = await Evaluator(config).evaluate_task(task=task, task_index=index, total_tasks=total)
@@ -288,7 +391,8 @@ async def run_one(args, working, agent_dir, key, task, index, total):
             mode='json', exclude={'trace', 'test_output'}) if 'result' in locals() else None}
         proxy.write_trace(
             task_logs / 'model_trace.json',
-            run={'task_id': task.instance_id, 'upstream_api_base': args.api_base},
+            run={'task_id': task.instance_id, 'provider': args.provider,
+                 'model': args.litellm_model, 'upstream_api_base': args.api_base},
             final=final,
         )
 
@@ -315,9 +419,7 @@ async def run(args, working):
         raise ValueError('Packages have no Python 3.13-compatible wheel: '
                          + '; '.join(incompatible)
                          + '. Repair caches with scripts/repair_task_wheels.py in Python 3.13 Linux Docker.')
-    key = os.getenv('VLLM_API_KEY') or os.getenv('VLLMAPI_KEY')
-    if not key:
-        raise ValueError('Set VLLM_API_KEY in .env')
+    key = provider_key(args.provider)
     sandbox_setup_dir = ROOT / 'data' / 'sandbox'
     if (sandbox_setup_dir / 'setup.py').is_file():
         os.environ.setdefault('KAGGLE_SANDBOX_DIR', str(sandbox_setup_dir))

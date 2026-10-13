@@ -229,12 +229,17 @@ LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/evaluate.p
 
 This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes under `logs/remote/val/fastapi_11194/checks/baseline/`. Reference patches are used only with `--reference-check`.
 
-### Run with a remote vLLM server
+### Run with vLLM or a hosted model
 
-The remote vLLM server must enable Gemma tool and reasoning parsers. Store its key in the root `.env` file:
+The runner uses LiteLLM. Its default remains the remote vLLM server; select a
+hosted provider with `--provider` and `--model`. Store the matching key in the
+root `.env` file:
 
 ```dotenv
 VLLM_API_KEY=your-key-here
+OPENAI_API_KEY=your-openai-key
+ANTHROPIC_API_KEY=your-anthropic-key
+GEMINI_API_KEY=your-gemini-key
 ```
 
 Run the base-model pipeline (or pass `--api-base` for a different endpoint):
@@ -243,6 +248,19 @@ Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 .venv/bin/python scripts/task_pipeline.py --val --task-id fastapi_11194 \
   --submission src/rishav/itr-1 \
   --api-base https://your-model-server/v1 --model gemma4
+```
+
+Examples for hosted models:
+
+```bash
+.venv/bin/python scripts/task_pipeline.py --train --task-id fastapi_11355 \
+  --submission src/rishav/itr-1 --provider openai --model gpt-4.1
+
+.venv/bin/python scripts/task_pipeline.py --train --task-id fastapi_11355 \
+  --submission src/rishav/itr-1 --provider anthropic --model claude-sonnet-4-5
+
+.venv/bin/python scripts/task_pipeline.py --train --task-id fastapi_11355 \
+  --submission src/rishav/itr-1 --provider gemini --model gemini-2.5-pro
 ```
 
 Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split dev`, or `--split val`) and select an agent iteration with `--submission src/<collaborator>/itr-<n>`. The task must belong to that split. Its task list and asset paths are resolved from the split manifest. Each task writes to `logs/remote/<collaborator>/itr-<n>/<split>/<task_id>/`: `traces/` holds its ATIF trace, `logs/` holds console output, and `results/` holds its patch and evaluation JSON. For example, `src/rishav/itr-1` writes to `logs/remote/rishav/itr-1/train/fastapi_14258/`. Tasks can run in parallel terminals without creating batch folders. Rerunning a task within the same collaborator iteration replaces that task's previous artifacts. If Langfuse is configured, each completed task trace and evaluation result is uploaded under the same `vllm-<split>-<timestamp>` session. Pass `--skip-langfuse` to keep the artifacts local, or `--langfuse-session-id ID` to choose the session ID.

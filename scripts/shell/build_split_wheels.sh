@@ -61,18 +61,18 @@ for split in train dev val; do
             --output-file /tmp/task-requirements.txt
           python -m pip download --dest "/workspace/$wheels" -r /tmp/task-requirements.txt
         fi
+        python -m pip download --dest "/workspace/$wheels" "ujson>=5.8" pytest-asyncio
         ;;
-      requests_*) python -m pip download --dest "/workspace/$wheels" -r requirements-dev.txt ;;
+      requests_*)
+        python -m pip download --dest "/workspace/$wheels" -r requirements-dev.txt
+        # httpbin 0.10.x relies on Werkzeug's pre-3.0 URL handling.
+        rm -f "/workspace/$wheels"/werkzeug-*.whl
+        python -m pip download --dest "/workspace/$wheels" "Werkzeug==2.3.8"
+        ;;
       httpx_*)    python -m pip download --dest "/workspace/$wheels" -r requirements.txt ;;
       rich_*)     python -m pip download --dest "/workspace/$wheels" . pytest pytest-cov attrs "typing-extensions<5" ;;
       *) echo "Unknown repository task: $task_id" >&2; exit 1 ;;
     esac
-
-    # httpbin 0.10.0 imports an API removed in Werkzeug 3.
-    if [[ "$task_id" == "requests_6592" ]]; then
-      rm -f "/workspace/$wheels"/werkzeug-*.whl
-      python -m pip download --dest "/workspace/$wheels" "Werkzeug==2.3.8"
-    fi
 
     for source_dist in "/workspace/$wheels"/*.tar.gz "/workspace/$wheels"/*.zip; do
       [[ -f "$source_dist" ]] || continue
