@@ -1,0 +1,93 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index d6359c0f..f0897750 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -39,15 +39,32 @@ class Dependant:
+     background_tasks_param_name: Optional[str] = None
+     security_scopes_param_name: Optional[str] = None
+     security_scopes: Optional[List[str]] = None
++    own_oauth_scopes: Optional[List[str]] = None
+     use_cache: bool = True
+     path: Optional[str] = None
+     scope: Union[Literal["function", "request"], None] = None
+ 
++    @cached_property
++    def _uses_scopes(self) -> bool:
++        if self.own_oauth_scopes:
++            return True
++        if self.security_scopes_param_name is not None:
++            return True
++        if isinstance(self.call, SecurityBase):
++            return True
++        for sub_dep in self.dependencies:
++            if sub_dep._uses_scopes:
++                return True
++        return False
++
+     @cached_property
+     def cache_key(self) -> DependencyCacheKey:
++        scopes_for_cache = (
++            tuple(sorted(set(self.security_scopes or []))) if self._uses_scopes else ()
++        )
+         return (
+             self.call,
+-            tuple(sorted(set(self.security_scopes or []))),
++            scopes_for_cache,
+             self.computed_scope or "",
+         )
+ 
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 45353835..2e603c34 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -134,6 +134,7 @@ def get_parameterless_sub_dependant(*, depends: params.Depends, path: str) -> De
+         call=depends.dependency,
+         scope=depends.scope,
+         security_scopes=use_security_scopes,
++        own_oauth_scopes=use_security_scopes,
+     )
+ 
+ 
+@@ -233,6 +234,7 @@ def get_dependant(
+     call: Callable[..., Any],
+     name: Optional[str] = None,
+     security_scopes: Optional[List[str]] = None,
++    own_oauth_scopes: Optional[List[str]] = None,
+     use_cache: bool = True,
+     scope: Union[Literal["function", "request"], None] = None,
+ ) -> Dependant:
+@@ -241,6 +243,7 @@ def get_dependant(
+         name=name,
+         path=path,
+         security_scopes=security_scopes,
++        own_oauth_scopes=own_oauth_scopes,
+         use_cache=use_cache,
+         scope=scope,
+     )
+@@ -276,8 +279,10 @@ def get_dependant(
+                     '"request", it cannot depend on dependencies with scope "function".'
+                 )
+             use_security_scopes = security_scopes or []
++            sub_own_oauth_scopes: List[str] = []
+             if isinstance(param_details.depends, params.Security):
+                 if param_details.depends.scopes:
++                    sub_own_oauth_scopes = list(param_details.depends.scopes)
+                     use_security_scopes = use_security_scopes + list(
+                         param_details.depends.scopes
+                     )
+@@ -286,6 +291,7 @@ def get_dependant(
+                 call=param_details.depends.dependency,
+                 name=param_name,
+                 security_scopes=use_security_scopes,
++                own_oauth_scopes=sub_own_oauth_scopes,
+                 use_cache=param_details.depends.use_cache,
+                 scope=param_details.depends.scope,
+             )
+@@ -612,6 +618,7 @@ async def solve_dependencies(
+                 call=call,
+                 name=sub_dependant.name,
+                 security_scopes=sub_dependant.security_scopes,
++                own_oauth_scopes=sub_dependant.own_oauth_scopes,
+                 scope=sub_dependant.scope,
+             )
+ 
