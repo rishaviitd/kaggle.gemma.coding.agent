@@ -1,0 +1,3 @@
+# Claude Sonnet 5.5 — 20 validation tasks
+
+Fresh execution of the same20 selected validation tasks using Rishav itr-1_v2. Run config is in run-config.json. Limits:330-second active session,40 counted tool calls,80 turns,240-second command/grading timeout,8192 output tokens per request. Adaptive thinking with readable summaries and explicit high effort requested by the user. Offline Docker; sequential execution; no batch failure cutoff. Full native exchanges, agent/model traces, ATIF, grading outputs and patches are saved under val/<task_id>/. The run is complete:14 passed,5 failed grading,1 evaluation blocked. See [results.md](results.md). The aggregate results and verified Langfuse receipt are included.
