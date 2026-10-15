@@ -112,8 +112,9 @@
           <fieldset class="trace-select-filter trace-select-filter--short"><legend>Dataset</legend><select id="split-select" aria-label="Dataset split"><option value="train">Train</option><option value="dev">Dev</option><option value="val">Val</option></select></fieldset>
           <fieldset class="trace-select-filter trace-select-filter--task"><legend>Task</legend><select id="task-select" aria-label="Task"></select></fieldset>
           <fieldset class="trace-outcome-filter"><legend>Outcome</legend>
+            <label><input type="radio" name="outcome-filter" value="all" checked> All</label>
             <label><input type="radio" name="outcome-filter" value="resolved"> Resolved</label>
-            <label><input type="radio" name="outcome-filter" value="unresolved" checked> Not resolved</label>
+            <label><input type="radio" name="outcome-filter" value="unresolved"> Not resolved</label>
           </fieldset>
         </div>
       </div></div>
@@ -127,6 +128,7 @@
     <script src="presentation/slides/task-visualization.js?v=__BUILD_VERSION__"></script>
     <script src="presentation/slides/what-to-configure.js?v=__BUILD_VERSION__"></script>
     <script src="presentation/slides/what-not-to-do.js?v=__BUILD_VERSION__"></script>
+    <script src="trace-formats.js"></script>
     <script>
       const h = React.createElement;
       const slides = [window.WhatToDoSlide, window.TaskVisualizationSlide, window.WhatToConfigureSlide, window.WhatNotToDoSlide];
@@ -160,7 +162,7 @@
         const system = messages.filter((m) => m.role === "system");
         const user = messages.filter((m) => m.role === "user");
         const history = messages.filter((m) => m.role !== "system" && m.role !== "user");
-        const tools = (req?.tools || []).map((t) => { const f = t.function || t; return `- ${f.name}: ${f.description || ""}\n  parameters: ${JSON.stringify(f.parameters || {})}`; }).join("\n");
+          const tools = (req?.tools || []).map((t) => { const f = t.function || t; return `- ${f.name}: ${f.description || ""}\n  parameters: ${JSON.stringify(f.parameters || f.parameters_json_schema || {})}`; }).join("\n");
         return [
           { title: "System Prompt", content: show(system) },
           { title: "User Prompt", content: show(user) },
@@ -214,6 +216,8 @@
       }
       function formattedOutput(o) {
         const parts = [];
+        if (o?.response_status != null) parts.push(`HTTP STATUS\n${o.response_status}`);
+        if (o?.error) parts.push(`ERROR\n${typeof o.error === "string" ? o.error : raw(o.error)}`);
         if (o?.reasoning) parts.push(`REASONING\n${o.reasoning}`);
         if (o?.assistant_content) parts.push(`ANSWER\n${o.assistant_content}`);
         for (const c of (o?.tool_calls || [])) parts.push(`TOOL CALL: ${c.name}\n${c.arguments_raw_json || JSON.stringify(c.arguments || {})}`);
@@ -290,6 +294,7 @@
           details.append(block("Model Input", expanded.request, formattedInput(expanded.request)));
           details.append(block("Model Output", turn.output, formattedOutput(turn.output)));
           details.append(block("Tool Results", turn.tool_results, formattedTools(turn.tool_results)));
+          if (turn.native_record) details.append(block("Native provider record", turn.native_record, raw(turn.native_record)));
           root.append(details);
         }
         const outcome = document.createElement("section"); outcome.className = "trace-outcome";
@@ -301,6 +306,8 @@
           status.textContent = "Evaluation result is not included in this trace.";
         }
         outcome.append(status);
+        if (trace.interrupted) { const note = document.createElement("p"); note.textContent = "Interrupted attempt — partial trace; no completed evaluation."; outcome.append(note); }
+        if (result?.error_message || result?.error) { const note = document.createElement("p"); note.textContent = result.error_message || result.error; outcome.append(note); }
         if (result?.test_exit_code != null) {
           const tests = document.createElement("p");
           tests.textContent = `Test exit code: ${result.test_exit_code}`;
@@ -335,7 +342,18 @@
             : `logs/remote/${split}/${encodeURIComponent(taskId)}/model_trace.json`;
           const response = await fetch(tracePath);
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const trace = await response.json();
+          let trace = await response.json();
+          let native = null;
+          if (task.native_path && (!trace.turns?.length || !trace.turns[0]?.output)) {
+            const nativeResponse = task.native_path === tracePath ? null : await fetch(task.native_path);
+            native = nativeResponse ? (nativeResponse.ok ? await nativeResponse.json() : null) : trace;
+          }
+          trace = TraceFormats.normalize(trace, native, task);
+          trace.interrupted = Boolean(task.interrupted);
+          if (task.result_path) {
+            const resultResponse = await fetch(task.result_path);
+            if (resultResponse.ok) trace.final = {...trace.final, result:await resultResponse.json()};
+          }
           if (loadVersion !== traceLoadVersion) return;
           showTrace(trace);
         } catch (error) {
@@ -347,7 +365,7 @@
         const filter = outcomeRadios.find((radio) => radio.checked)?.value || "all";
         const tasks = (traceIndex[iterationSelect.value]?.[splitSelect.value] || []).filter((task) => {
           const resolved = typeof task === "string" ? null : task.resolved;
-          return filter === "resolved" ? resolved === true : resolved !== true;
+          return filter === "all" || (filter === "resolved" ? resolved === true : resolved !== true);
         });
         taskSelect.replaceChildren();
         for (const task of tasks) {
@@ -361,7 +379,7 @@
       splitSelect.addEventListener("change", updateTasks);
       taskSelect.addEventListener("change", loadSelectedTrace);
       outcomeRadios.forEach((radio) => radio.addEventListener("change", updateTasks));
-      fetch("trace-index.json?v=__BUILD_VERSION__").then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }).then((data) => {
+      fetch("trace-index.json", {cache:"no-store"}).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }).then((data) => {
         traceIndex = data.iterations || {};
         const iterations = Object.keys(traceIndex).sort();
         iterationSelect.replaceChildren();

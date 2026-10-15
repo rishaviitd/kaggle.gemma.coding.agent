@@ -118,43 +118,10 @@ def main() -> None:
     trace_root = site_root / 'logs' / 'remote'
     splits = ('train', 'dev', 'val')
 
-    def available_iterations() -> list[str]:
-        return sorted(
-            (
-                path.relative_to(trace_root).as_posix()
-                for path in trace_root.rglob('*')
-                if path.is_dir() and any((path / split).is_dir() for split in splits)
-            ),
-            key=lambda name: (name != 'base', name.casefold()),
-        )
+    from build_trace_index import build_index
 
-    def available_traces() -> dict[str, dict[str, list[dict[str, object]]]]:
-        def task_entry(iteration_name: str, task_dir: Path) -> dict[str, object]:
-            resolved = None
-            try:
-                trace = json.loads((task_dir / 'model_trace.json').read_text(encoding='utf-8'))
-                value = trace.get('final', {}).get('result', {}).get('resolved')
-                resolved = value if isinstance(value, bool) else None
-            except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
-                pass
-            split = task_dir.parent.name
-            return {
-                'task_id': task_dir.name,
-                'resolved': resolved,
-                'trace_path': f'logs/remote/{iteration_name}/{split}/{task_dir.name}/model_trace.json',
-            }
-
-        return {
-            iteration_name: {
-                split: [task_entry(iteration_name, task_dir) for task_dir in sorted(
-                    task_dir
-                    for task_dir in (trace_root / iteration_name / split).iterdir()
-                    if task_dir.is_dir() and (task_dir / 'model_trace.json').is_file()
-                )] if (trace_root / iteration_name / split).is_dir() else []
-                for split in splits
-            }
-            for iteration_name in available_iterations()
-        }
+    def available_traces():
+        return build_index(site_root, trace_root)["iterations"]
 
     if args.write_index:
         index = available_traces()
@@ -185,7 +152,7 @@ def main() -> None:
                 iteration_name = query.get('iteration', [''])[0]
                 split = query.get('split', [''])[0]
                 task_id = query.get('task_id', [''])[0]
-                valid_iterations = set(available_iterations())
+                valid_iterations = set(available_traces())
                 if (
                     iteration_name not in valid_iterations
                     or split not in splits

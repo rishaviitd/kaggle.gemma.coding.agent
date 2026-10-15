@@ -18,6 +18,8 @@ from typing import Any
 
 
 TRACE_NAME = "model_trace.json"
+TRACE_NAMES = (TRACE_NAME, "gemini_exchanges.json", "azure_exchanges.json",
+               "bedrock_exchanges.json", "agent_trace.json")
 SPLITS = ("train", "dev", "val")
 
 
@@ -45,18 +47,35 @@ def build_index(project_root: Path, trace_root: Path) -> dict[str, Any]:
         lambda: {split: [] for split in SPLITS}
     )
 
-    for trace_path in trace_root.rglob(TRACE_NAME):
-        relative = trace_path.relative_to(trace_root)
+    task_dirs = {path.parent for name in TRACE_NAMES for path in trace_root.rglob(name)}
+    for task_dir in sorted(task_dirs):
+        relative = task_dir.relative_to(trace_root)
         if len(relative.parts) < 3:
             continue
-        *directory, split, task_id, filename = relative.parts
-        if split not in SPLITS or filename != TRACE_NAME:
+        *directory, split, task_id = relative.parts
+        interrupted = split == "interrupted"
+        if interrupted:
+            directory.append(split)
+            split = "val"
+        if split not in SPLITS:
             continue
+        trace_path = next(task_dir/name for name in TRACE_NAMES if (task_dir/name).is_file())
 
         entry: dict[str, Any] = {
             "task_id": task_id,
             "trace_path": trace_path.relative_to(project_root).as_posix(),
         }
+        if interrupted:
+            entry["interrupted"] = True
+        for name in TRACE_NAMES[1:4]:
+            if (task_dir/name).is_file():
+                entry["native_path"] = (task_dir/name).relative_to(project_root).as_posix()
+                break
+        result_path = task_dir/"results"/(task_id+".json")
+        if result_path.is_file():
+            entry["result_path"] = result_path.relative_to(project_root).as_posix()
+        if (task_dir/"agent_trace.json").is_file():
+            entry["agent_path"] = (task_dir/"agent_trace.json").relative_to(project_root).as_posix()
         resolved = read_resolved(trace_path)
         if resolved is not None:
             entry["resolved"] = resolved
