@@ -1,0 +1,168 @@
+diff --git a/src/ahttpx/_parsers.py b/src/ahttpx/_parsers.py
+index 8a52a56..484f428 100644
+--- a/src/ahttpx/_parsers.py
++++ b/src/ahttpx/_parsers.py
+@@ -375,7 +375,11 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    async def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    async def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+         is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+diff --git a/src/ahttpx/_pool.py b/src/ahttpx/_pool.py
+index f712cfa..4303f98 100644
+--- a/src/ahttpx/_pool.py
++++ b/src/ahttpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     async def _complete(self) -> None:
+-        await self._parser.complete()
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     async def _close(self) -> None:
+diff --git a/src/ahttpx/_server.py b/src/ahttpx/_server.py
+index a9103cc..c804d18 100644
+--- a/src/ahttpx/_server.py
++++ b/src/ahttpx/_server.py
+@@ -89,7 +89,10 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     async def _complete(self):
+-        await self._parser.complete
++        # Drain any remaining request body before resetting.
++        while await self._parser.recv_body():
++            pass
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -104,8 +107,11 @@ class HTTPServer:
+ 
+ @contextlib.asynccontextmanager
+ async def serve_http(endpoint):
++    connections = []
++
+     async def handler(stream):
+         connection = HTTPConnection(stream, endpoint)
++        connections.append(connection)
+         await connection.handle_requests()
+ 
+     logging.basicConfig(
+@@ -115,12 +121,19 @@ async def serve_http(endpoint):
+     )
+ 
+     backend = NetworkBackend()
+-    async with await backend.serve("127.0.0.1", 8080, handler) as server:
+-        server = HTTPServer(server.host, server.port)
+-        logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
+-        yield server
++    try:
++        async with await backend.serve("127.0.0.1", 8080, handler) as server:
++            server = HTTPServer(server.host, server.port)
++            logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
++            yield server
++    finally:
++        for connection in connections:
++            await connection.close()
+ 
+ 
+ async def run(app):
+-    async with await serve_http(app) as server:
+-        server.wait()
++    try:
++        async with await serve_http(app) as server:
++            await server.wait()
++    except KeyboardInterrupt:
++        pass
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..61ac4cb 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -375,7 +375,11 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+         is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+diff --git a/src/httpx/_pool.py b/src/httpx/_pool.py
+index 7193f8d..64f4fe0 100644
+--- a/src/httpx/_pool.py
++++ b/src/httpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     def _complete(self) -> None:
+-        self._parser.complete()
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     def _close(self) -> None:
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..e7d6b33 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -89,7 +89,10 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        # Drain any remaining request body before resetting.
++        while self._parser.recv_body():
++            pass
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -104,8 +107,11 @@ class HTTPServer:
+ 
+ @contextlib.contextmanager
+ def serve_http(endpoint):
++    connections = []
++
+     def handler(stream):
+         connection = HTTPConnection(stream, endpoint)
++        connections.append(connection)
+         connection.handle_requests()
+ 
+     logging.basicConfig(
+@@ -115,12 +121,19 @@ def serve_http(endpoint):
+     )
+ 
+     backend = NetworkBackend()
+-    with backend.serve("127.0.0.1", 8080, handler) as server:
+-        server = HTTPServer(server.host, server.port)
+-        logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
+-        yield server
++    try:
++        with backend.serve("127.0.0.1", 8080, handler) as server:
++            server = HTTPServer(server.host, server.port)
++            logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
++            yield server
++    finally:
++        for connection in connections:
++            connection.close()
+ 
+ 
+ def run(app):
+-    with serve_http(app) as server:
+-        server.wait()
++    try:
++        with serve_http(app) as server:
++            server.wait()
++    except KeyboardInterrupt:
++        pass

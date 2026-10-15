@@ -1,0 +1,148 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..9844a3fc 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,12 +155,32 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        _endpoint_context: Optional[str] = None,
++    ) -> None:
+         self._errors = errors
++        # Traceback-like context (file, line, function, HTTP method and route)
++        # of the endpoint that raised this validation error, used to build a
++        # more helpful message in __str__.
++        self._endpoint_context = _endpoint_context
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        message = (
++            f"{len(self._errors)} validation error"
++            f"{'s' if len(self._errors) != 1 else ''}:\n"
++        )
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self._endpoint_context:
++            message += f"\n{self._endpoint_context}"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+     def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+@@ -176,9 +196,3 @@ class ResponseValidationError(ValidationException):
+     def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+         super().__init__(errors)
+         self.body = body
+-
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..7adf2fa4 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -212,6 +212,31 @@ def _merge_lifespan_context(
+     return merged_lifespan  # type: ignore[return-value]
+ 
+ 
++@functools.lru_cache(maxsize=None)
++def _get_endpoint_context(
++    endpoint: Callable[..., Any], method: str, route: str
++) -> str:
++    """
++    Build a traceback-like context string pointing at the endpoint (path
++    operation function) that raised a validation error.
++
++    The result is cached per (endpoint, method, route) so that the (possibly
++    expensive) introspection is only done once per endpoint.
++    """
++    function_name = getattr(endpoint, "__name__", None) or repr(endpoint)
++    code = getattr(endpoint, "__code__", None)
++    if code is not None:
++        filepath = code.co_filename
++        line_number = code.co_firstlineno
++    else:
++        filepath = "<unknown>"
++        line_number = 0
++    return (
++        f'  File "{filepath}", line {line_number}, in {function_name}\n'
++        f"    {method} {route}"
++    )
++
++
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
+@@ -223,6 +248,7 @@ async def serialize_response(
+     exclude_defaults: bool = False,
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
++    endpoint_context: Optional[str] = None,
+ ) -> Any:
+     if field:
+         errors = []
+@@ -246,7 +272,9 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors),
++                body=response_content,
++                _endpoint_context=endpoint_context,
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -300,6 +328,7 @@ def get_request_handler(
+     response_model_exclude_none: bool = False,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_context: Optional[str] = None,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
+     is_coroutine = dependant.is_coroutine_callable
+@@ -355,6 +384,7 @@ def get_request_handler(
+                     }
+                 ],
+                 body=e.doc,
++                _endpoint_context=endpoint_context,
+             )
+             raise validation_error from e
+         except HTTPException:
+@@ -414,6 +444,7 @@ def get_request_handler(
+                     exclude_defaults=response_model_exclude_defaults,
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
++                    endpoint_context=endpoint_context,
+                 )
+                 response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+@@ -421,7 +452,9 @@ def get_request_handler(
+                 response.headers.raw.extend(solved_result.response.headers.raw)
+         if errors:
+             validation_error = RequestValidationError(
+-                _normalize_errors(errors), body=body
++                _normalize_errors(errors),
++                body=body,
++                _endpoint_context=endpoint_context,
+             )
+             raise validation_error
+ 
+@@ -491,6 +524,9 @@ class APIWebSocketRoute(routing.WebSocketRoute):
+                 dependant=self.dependant,
+                 dependency_overrides_provider=dependency_overrides_provider,
+                 embed_body_fields=self._embed_body_fields,
++                endpoint_context=_get_endpoint_context(
++                    self.endpoint, "WEBSOCKET", self.path_format
++                ),
+             )
+         )
+ 
