@@ -1,0 +1,52 @@
+diff --git a/fastapi/_compat/v2.py b/fastapi/_compat/v2.py
+index acd23d84..65968077 100644
+--- a/fastapi/_compat/v2.py
++++ b/fastapi/_compat/v2.py
+@@ -3,6 +3,7 @@ import warnings
+ from copy import copy, deepcopy
+ from dataclasses import dataclass
+ from enum import Enum
++from functools import cached_property
+ from typing import (
+     Any,
+     Dict,
+@@ -82,7 +83,10 @@ class ModelField:
+     def type_(self) -> Any:
+         return self.field_info.annotation
+ 
+-    def __post_init__(self) -> None:
++    @cached_property
++    def _type_adapter(self) -> TypeAdapter[Any]:
++        # Model fields are also inspected for schema discovery and parameter
++        # extraction, which do not require an independent validator.
+         with warnings.catch_warnings():
+             # Pydantic >= 2.12.0 warns about field specific metadata that is unused
+             # (e.g. `TypeAdapter(Annotated[int, Field(alias='b')])`). In some cases, we
+@@ -94,9 +98,7 @@ class ModelField:
+                 warnings.simplefilter(
+                     "ignore", category=UnsupportedFieldAttributeWarning
+                 )
+-            self._type_adapter: TypeAdapter[Any] = TypeAdapter(
+-                Annotated[self.field_info.annotation, self.field_info]
+-            )
++            return TypeAdapter(Annotated[self.field_info.annotation, self.field_info])
+ 
+     def get_default(self) -> Any:
+         if self.field_info.is_required():
+diff --git a/fastapi/utils.py b/fastapi/utils.py
+index b3b89ed2..526d6287 100644
+--- a/fastapi/utils.py
++++ b/fastapi/utils.py
+@@ -121,7 +121,11 @@ def create_model_field(
+         )
+         kwargs = {"mode": mode, "name": name, "field_info": field_info}
+         try:
+-            return v2.ModelField(**kwargs)  # type: ignore[return-value,arg-type]
++            field = v2.ModelField(**kwargs)  # type: ignore[arg-type]
++            # Validate route field types eagerly, while allowing model fields
++            # used only for introspection to defer adapter construction.
++            field._type_adapter
++            return field  # type: ignore[return-value]
+         except PydanticSchemaGenerationError:
+             raise fastapi.exceptions.FastAPIError(
+                 _invalid_args_message.format(type_=type_)

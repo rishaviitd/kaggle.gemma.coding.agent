@@ -1,0 +1,305 @@
+diff --git a/src/ahttpx/_network.py b/src/ahttpx/_network.py
+index 957e036..3acaa52 100644
+--- a/src/ahttpx/_network.py
++++ b/src/ahttpx/_network.py
+@@ -32,9 +32,9 @@ class NetworkStream(Stream):
+ 
+     async def close(self) -> None:
+         if not self._closed:
++            self._closed = True
+             self._writer.close()
+             await self._writer.wait_closed()
+-            self._closed = True
+ 
+     def __repr__(self):
+         description = ""
+@@ -61,10 +61,11 @@ class NetworkStream(Stream):
+ 
+ 
+ class NetworkServer:
+-    def __init__(self, host: str, port: int, server: asyncio.Server):
++    def __init__(self, host: str, port: int, server: asyncio.Server, streams=None):
+         self.host = host
+         self.port = port
+         self._server = server
++        self._streams = streams if streams is not None else set()
+ 
+     # Context managed usage...
+     async def __aenter__(self) -> "NetworkServer":
+@@ -78,6 +79,8 @@ class NetworkServer:
+     ):
+         self._server.close()
+         await self._server.wait_closed()
++        for stream in list(self._streams):
++            await stream.close()
+ 
+ 
+ class NetworkBackend:
+@@ -106,12 +109,19 @@ class NetworkBackend:
+         return NetworkStream(reader, writer, address=address)
+ 
+     async def serve(self, host: str, port: int, handler: typing.Callable[[NetworkStream], None]) -> NetworkServer:
++        streams = set()
++
+         async def callback(reader, writer):
+             stream = NetworkStream(reader, writer)
+-            await handler(stream)
++            streams.add(stream)
++            try:
++                await handler(stream)
++            finally:
++                await stream.close()
++                streams.discard(stream)
+ 
+         server = await asyncio.start_server(callback, host, port)
+-        return NetworkServer(host, port, server)
++        return NetworkServer(host, port, server, streams)
+ 
+ 
+ Semaphore = asyncio.Semaphore
+diff --git a/src/ahttpx/_parsers.py b/src/ahttpx/_parsers.py
+index 8a52a56..2502ea1 100644
+--- a/src/ahttpx/_parsers.py
++++ b/src/ahttpx/_parsers.py
+@@ -80,7 +80,7 @@ class HTTPParser:
+     client.recv_status_line()
+     client.recv_headers()
+     client.recv_body()
+-    client.complete()
++    client.reset()
+     client.close()
+     """
+     def __init__(self, stream: Stream, mode: str) -> None:
+@@ -375,11 +375,14 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    async def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    async def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+-        if not (is_fully_complete and is_keepalive):
++        if not (is_fully_complete and self.keep_alive):
+             await self.close()
+             return
+ 
+diff --git a/src/ahttpx/_pool.py b/src/ahttpx/_pool.py
+index f712cfa..4303f98 100644
+--- a/src/ahttpx/_pool.py
++++ b/src/ahttpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     async def _complete(self) -> None:
+-        await self._parser.complete()
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     async def _close(self) -> None:
+diff --git a/src/ahttpx/_server.py b/src/ahttpx/_server.py
+index a9103cc..ff99884 100644
+--- a/src/ahttpx/_server.py
++++ b/src/ahttpx/_server.py
+@@ -3,7 +3,7 @@ import logging
+ import time
+ 
+ from ._content import Text
+-from ._parsers import HTTPParser
++from ._parsers import HTTPParser, State
+ from ._request import Request
+ from ._response import Response
+ from ._network import NetworkBackend, sleep
+@@ -51,9 +51,11 @@ class HTTPConnection:
+                         await self._send_body(response)
+         except Exception:
+             logger.error("Internal Server Error", exc_info=True)
++        finally:
++            await self.close()
+ 
+     async def close(self):
+-        self._parser.close()
++        await self._parser.close()
+ 
+     # Receive the request...
+     async def _recv_head(self) -> tuple[str, str, list[tuple[str, str]]]:
+@@ -89,7 +91,10 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     async def _complete(self):
+-        await self._parser.complete
++        if self._parser.keep_alive and self._parser.recv_state == State.RECV_BODY:
++            while await self._parser.recv_body():
++                pass
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -118,9 +123,12 @@ async def serve_http(endpoint):
+     async with await backend.serve("127.0.0.1", 8080, handler) as server:
+         server = HTTPServer(server.host, server.port)
+         logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
+-        yield server
++        try:
++            yield server
++        except KeyboardInterrupt:
++            pass
+ 
+ 
+ async def run(app):
+-    async with await serve_http(app) as server:
+-        server.wait()
++    async with serve_http(app) as server:
++        await server.wait()
+diff --git a/src/httpx/_network.py b/src/httpx/_network.py
+index 5ea9bb5..a9987c5 100644
+--- a/src/httpx/_network.py
++++ b/src/httpx/_network.py
+@@ -81,6 +81,10 @@ class NetworkStream(Stream):
+     def close(self) -> None:
+         if not self._is_closed:
+             self._is_closed = True
++            try:
++                self._socket.shutdown(socket.SHUT_RDWR)
++            except OSError:
++                pass
+             self._socket.close()
+ 
+     def __repr__(self):
+@@ -160,7 +164,9 @@ class NetworkServer:
+         self._max_workers = 5
+         self._executor = None
+         self._thread = None
+-        self._streams = list[NetworkStream]
++        self._streams = set()
++        self._lock = threading.Lock()
++        self._closed = False
+ 
+     @property
+     def host(self):
+@@ -176,18 +182,29 @@ class NetworkServer:
+         return self
+ 
+     def __exit__(self, exc_type, exc_val, exc_tb):
+-        self.listener.close()
++        with self._lock:
++            self._closed = True
++            self.listener.close()
++            for stream in self._streams:
++                stream.close()
+         self._executor.shutdown(wait=True)
+ 
+     def _serve(self):
+         while stream := self.listener.accept():
+-            self._executor.submit(self._handler, stream)
++            with self._lock:
++                if self._closed:
++                    stream.close()
++                    break
++                self._streams.add(stream)
++                self._executor.submit(self._handler, stream)
+ 
+     def _handler(self, stream):
+         try:
+             self.handler(stream)
+         finally:
+             stream.close()
++            with self._lock:
++                self._streams.discard(stream)
+ 
+ 
+ class NetworkBackend:
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..8da5bb6 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -80,7 +80,7 @@ class HTTPParser:
+     client.recv_status_line()
+     client.recv_headers()
+     client.recv_body()
+-    client.complete()
++    client.reset()
+     client.close()
+     """
+     def __init__(self, stream: Stream, mode: str) -> None:
+@@ -375,11 +375,14 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+-        if not (is_fully_complete and is_keepalive):
++        if not (is_fully_complete and self.keep_alive):
+             self.close()
+             return
+ 
+diff --git a/src/httpx/_pool.py b/src/httpx/_pool.py
+index 7193f8d..64f4fe0 100644
+--- a/src/httpx/_pool.py
++++ b/src/httpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     def _complete(self) -> None:
+-        self._parser.complete()
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     def _close(self) -> None:
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..6c71e56 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -3,7 +3,7 @@ import logging
+ import time
+ 
+ from ._content import Text
+-from ._parsers import HTTPParser
++from ._parsers import HTTPParser, State
+ from ._request import Request
+ from ._response import Response
+ from ._network import NetworkBackend, sleep
+@@ -51,6 +51,8 @@ class HTTPConnection:
+                         self._send_body(response)
+         except Exception:
+             logger.error("Internal Server Error", exc_info=True)
++        finally:
++            self.close()
+ 
+     def close(self):
+         self._parser.close()
+@@ -89,7 +91,10 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        if self._parser.keep_alive and self._parser.recv_state == State.RECV_BODY:
++            while self._parser.recv_body():
++                pass
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -118,7 +123,10 @@ def serve_http(endpoint):
+     with backend.serve("127.0.0.1", 8080, handler) as server:
+         server = HTTPServer(server.host, server.port)
+         logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
+-        yield server
++        try:
++            yield server
++        except KeyboardInterrupt:
++            pass
+ 
+ 
+ def run(app):

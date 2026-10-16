@@ -1,0 +1,185 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..cad8ecdd 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,16 +155,41 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(
++        self, errors: Sequence[Any], *, endpoint_ctx: Optional[Dict[str, Any]] = None
++    ) -> None:
+         self._errors = errors
++        self.endpoint_ctx = endpoint_ctx or {}
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        ctx = self.endpoint_ctx
++        if ctx:
++            message += "\n"
++            if "file" in ctx:
++                message += (
++                    f'  File "{ctx["file"]}", line {ctx["line"]}, '
++                    f'in {ctx["function"]}\n'
++                )
++            if "path" in ctx:
++                message += f'    {ctx["method"]} {ctx["path"]}\n'
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_ctx: Optional[Dict[str, Any]] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_ctx=endpoint_ctx)
+         self.body = body
+ 
+ 
+@@ -173,12 +198,12 @@ class WebSocketRequestValidationError(ValidationException):
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_ctx: Optional[Dict[str, Any]] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_ctx=endpoint_ctx)
+         self.body = body
+-
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..989bd06d 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -212,6 +212,37 @@ def _merge_lifespan_context(
+     return merged_lifespan  # type: ignore[return-value]
+ 
+ 
++def _get_endpoint_context(endpoint: Optional[Callable[..., Any]]) -> Dict[str, Any]:
++    """Extract source information once, when the endpoint handler is built."""
++    if endpoint is None:
++        return {}
++    try:
++        endpoint = inspect.unwrap(endpoint)
++        if isinstance(endpoint, functools.partial):
++            endpoint = endpoint.func
++        if not inspect.isfunction(endpoint) and not inspect.ismethod(endpoint):
++            endpoint = endpoint.__call__
++        code = endpoint.__code__
++        return {
++            "file": code.co_filename,
++            "line": code.co_firstlineno,
++            "function": endpoint.__name__,
++        }
++    except (AttributeError, TypeError, ValueError):
++        return {}
++
++
++def _endpoint_context(source: Dict[str, Any], scope: Scope) -> Dict[str, Any]:
++    route = scope.get("route")
++    if route is None:
++        return source
++    return {
++        **source,
++        "path": route.path,
++        "method": scope.get("method", "WS"),
++    }
++
++
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
+@@ -223,6 +254,7 @@ async def serialize_response(
+     exclude_defaults: bool = False,
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
++    endpoint_ctx: Optional[Dict[str, Any]] = None,
+ ) -> Any:
+     if field:
+         errors = []
+@@ -246,7 +278,9 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors),
++                body=response_content,
++                endpoint_ctx=endpoint_ctx,
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -302,6 +336,7 @@ def get_request_handler(
+     embed_body_fields: bool = False,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
++    endpoint_source = _get_endpoint_context(dependant.call)
+     is_coroutine = dependant.is_coroutine_callable
+     is_body_form = body_field and isinstance(
+         body_field.field_info, (params.Form, temp_pydantic_v1_params.Form)
+@@ -355,6 +390,7 @@ def get_request_handler(
+                     }
+                 ],
+                 body=e.doc,
++                endpoint_ctx=_endpoint_context(endpoint_source, request.scope),
+             )
+             raise validation_error from e
+         except HTTPException:
+@@ -414,6 +450,7 @@ def get_request_handler(
+                     exclude_defaults=response_model_exclude_defaults,
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
++                    endpoint_ctx=_endpoint_context(endpoint_source, request.scope),
+                 )
+                 response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+@@ -421,7 +458,9 @@ def get_request_handler(
+                 response.headers.raw.extend(solved_result.response.headers.raw)
+         if errors:
+             validation_error = RequestValidationError(
+-                _normalize_errors(errors), body=body
++                _normalize_errors(errors),
++                body=body,
++                endpoint_ctx=_endpoint_context(endpoint_source, request.scope),
+             )
+             raise validation_error
+ 
+@@ -437,6 +476,8 @@ def get_websocket_app(
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
+ ) -> Callable[[WebSocket], Coroutine[Any, Any, Any]]:
++    endpoint_source = _get_endpoint_context(dependant.call)
++
+     async def app(websocket: WebSocket) -> None:
+         async_exit_stack = websocket.scope.get("fastapi_inner_astack")
+         assert isinstance(async_exit_stack, AsyncExitStack), (
+@@ -451,7 +492,8 @@ def get_websocket_app(
+         )
+         if solved_result.errors:
+             raise WebSocketRequestValidationError(
+-                _normalize_errors(solved_result.errors)
++                _normalize_errors(solved_result.errors),
++                endpoint_ctx=_endpoint_context(endpoint_source, websocket.scope),
+             )
+         assert dependant.call is not None, "dependant.call must be a function"
+         await dependant.call(**solved_result.values)
