@@ -1,0 +1,106 @@
+diff --git a/src/httpx/_network.py b/src/httpx/_network.py
+index 5ea9bb5..522c17d 100644
+--- a/src/httpx/_network.py
++++ b/src/httpx/_network.py
+@@ -160,7 +160,7 @@ class NetworkServer:
+         self._max_workers = 5
+         self._executor = None
+         self._thread = None
+-        self._streams = list[NetworkStream]
++        self._streams = []
+ 
+     @property
+     def host(self):
+@@ -177,6 +177,8 @@ class NetworkServer:
+ 
+     def __exit__(self, exc_type, exc_val, exc_tb):
+         self.listener.close()
++        for stream in self._streams:
++            stream.close()
+         self._executor.shutdown(wait=True)
+ 
+     def _serve(self):
+@@ -184,10 +186,12 @@ class NetworkServer:
+             self._executor.submit(self._handler, stream)
+ 
+     def _handler(self, stream):
++        self._streams.append(stream)
+         try:
+             self.handler(stream)
+         finally:
+             stream.close()
++            self._streams.remove(stream)
+ 
+ 
+ class NetworkBackend:
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..4069551 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -109,6 +109,10 @@ class HTTPParser:
+         # Special states...
+         self.processing_1xx = False
+ 
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
+     def send_method_line(self, method: bytes, target: bytes, protocol: bytes) -> None:
+         """
+         Send the initial request line:
+@@ -375,7 +379,7 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+         is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..a13b17b 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -89,12 +89,14 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+ class HTTPServer:
+     def __init__(self, host, port):
++        self.host = host
++        self.port = port
+         self.url = f"http://{host}:{port}/"
+ 
+     def wait(self):
+@@ -122,5 +124,8 @@ def serve_http(endpoint):
+ 
+ 
+ def run(app):
+-    with serve_http(app) as server:
+-        server.wait()
++    try:
++        with serve_http(app) as server:
++            server.wait()
++    except KeyboardInterrupt:
++        pass
+diff --git a/src/httpx/_streams.py b/src/httpx/_streams.py
+index c88a63f..d83803c 100644
+--- a/src/httpx/_streams.py
++++ b/src/httpx/_streams.py
+@@ -127,6 +127,11 @@ class HTTPStream(Stream):
+         return output
+ 
+     def close(self) -> None:
++        # Consume all remaining chunks to ensure the request is read to completion.
++        while True:
++            chunk = self._next_chunk()
++            if chunk == b'':
++                break
+         self._buffer.close()
+         if self._complete is not None:
+             self._complete()

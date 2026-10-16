@@ -1,0 +1,101 @@
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..86717bf 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -375,9 +375,13 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
++        is_keepalive = self.keep_alive
+ 
+         if not (is_fully_complete and is_keepalive):
+             self.close()
+diff --git a/src/httpx/_pool.py b/src/httpx/_pool.py
+index 7193f8d..64f4fe0 100644
+--- a/src/httpx/_pool.py
++++ b/src/httpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     def _complete(self) -> None:
+-        self._parser.complete()
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     def _close(self) -> None:
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..5242171 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -33,7 +33,7 @@ class HTTPConnection:
+         try:
+             while not self._parser.is_closed():
+                 method, url, headers = self._recv_head()
+-                stream = HTTPStream(self._recv_body, self._complete)
++                stream = HTTPStream(self._recv_body, self._complete, self._parser)
+                 # TODO: Handle endpoint exceptions
+                 with Request(method, url, headers=headers, content=stream) as request:
+                     try:
+@@ -89,7 +89,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -118,7 +118,10 @@ def serve_http(endpoint):
+     with backend.serve("127.0.0.1", 8080, handler) as server:
+         server = HTTPServer(server.host, server.port)
+         logger.info(f"Serving on {server.url} (Press CTRL+C to quit)")
+-        yield server
++        try:
++            yield server
++        except KeyboardInterrupt:
++            pass
+ 
+ 
+ def run(app):
+diff --git a/src/httpx/_streams.py b/src/httpx/_streams.py
+index c88a63f..4f7f5e8 100644
+--- a/src/httpx/_streams.py
++++ b/src/httpx/_streams.py
+@@ -92,9 +92,10 @@ class FileStream(Stream):
+ 
+ 
+ class HTTPStream(Stream):
+-    def __init__(self, next_chunk, complete):
++    def __init__(self, next_chunk, complete, parser=None):
+         self._next_chunk = next_chunk
+         self._complete = complete
++        self._parser = parser
+         self._buffer = io.BytesIO()
+ 
+     def read(self, size=-1) -> bytes:
+@@ -127,6 +128,17 @@ class HTTPStream(Stream):
+         return output
+ 
+     def close(self) -> None:
++        if self._parser and self._parser.keep_alive:
++            from ._parsers import State, ProtocolError
++            while self._parser.recv_state != State.DONE:
++                chunk = self._next_chunk()
++                if not chunk:
++                    break
++                try:
++                    self._parser.recv_body(chunk)
++                except ProtocolError:
++                    break
++
+         self._buffer.close()
+         if self._complete is not None:
+             self._complete()
