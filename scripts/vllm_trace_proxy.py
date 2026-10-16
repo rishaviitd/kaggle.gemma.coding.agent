@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class VllmTraceProxy:
     """Local transparent proxy that records provider-native model exchanges."""
 
-    def __init__(self, upstream_base: str) -> None:
+    def __init__(
+        self, upstream_base: str,
+        request_rewriter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> None:
         self.upstream_base = upstream_base.rstrip('/')
+        self.request_rewriter = request_rewriter
         self.exchanges: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -35,6 +40,10 @@ class VllmTraceProxy:
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get('Content-Length', '0'))
                 request_body = self.rfile.read(length)
+                if proxy.request_rewriter is not None:
+                    decoded = _decode_json(request_body)
+                    if isinstance(decoded, dict):
+                        request_body = json.dumps(proxy.request_rewriter(decoded)).encode()
                 suffix = self.path
                 if proxy.upstream_base.endswith('/v1') and suffix.startswith('/v1/'):
                     suffix = suffix[3:]
@@ -42,11 +51,12 @@ class VllmTraceProxy:
                 headers = {
                     key: value
                     for key, value in self.headers.items()
-                    if key.lower() not in {'host', 'content-length', 'connection'}
+                    if key.lower() not in {'host', 'content-length', 'connection', 'accept-encoding'}
                 }
                 request = urllib.request.Request(
                     upstream_url, data=request_body, headers=headers, method='POST'
                 )
+                started = time.monotonic()
                 try:
                     with urllib.request.urlopen(request, timeout=900) as response:
                         status = response.status
@@ -66,6 +76,7 @@ class VllmTraceProxy:
                         'request': _decode_json(request_body),
                         'response_status': status,
                         'response': _decode_json(response_body),
+                        'duration_seconds': time.monotonic() - started,
                     })
 
                 self.send_response(status)
@@ -115,6 +126,9 @@ class VllmTraceProxy:
                     'assistant_content': message.get('content'),
                     'reasoning': message.get('reasoning') or message.get('reasoning_content'),
                     'tool_calls': tool_calls,
+                    'usage': response.get('usage'),
+                    'duration_seconds': exchange.get('duration_seconds'),
+                    'error': response.get('error'),
                 },
                 'tool_results': _tool_results(later_requests, tool_calls),
             })
@@ -140,7 +154,7 @@ def _system_text(request: dict[str, Any]) -> str:
             continue
         content = message.get('content')
         return content if isinstance(content, str) else json.dumps(content)
-    system = request.get('system')
+    system = request.get('system') or request.get('instructions')
     return system if isinstance(system, str) else ''
 
 
@@ -148,6 +162,8 @@ def _assistant_message(response: dict[str, Any]) -> dict[str, Any]:
     """Normalize the common OpenAI, Anthropic, and Gemini response shapes."""
     if choices := response.get('choices'):
         return choices[0].get('message') or {}
+    if isinstance(response.get('output'), list):
+        return _responses_message(response['output'])
     if isinstance(response.get('content'), list):
         content = response['content']
         text = ''.join(item.get('text', '') for item in content if item.get('type') == 'text')
@@ -169,10 +185,28 @@ def _assistant_message(response: dict[str, Any]) -> dict[str, Any]:
     return {'content': text or None, 'tool_calls': calls}
 
 
+def _responses_message(output: list[dict[str, Any]]) -> dict[str, Any]:
+    """Flatten an OpenAI Responses API output list into a chat-style message."""
+    text, reasoning, calls = [], [], []
+    for item in output:
+        kind = item.get('type')
+        if kind == 'message':
+            text += [part.get('text', '') for part in item.get('content') or []
+                     if part.get('type') == 'output_text']
+        elif kind == 'reasoning':
+            reasoning += [part.get('text', '') for part in item.get('summary') or []]
+        elif kind == 'function_call':
+            calls.append({'id': item.get('call_id'), 'type': 'function',
+                          'function': {'name': item.get('name'),
+                                       'arguments': item.get('arguments')}})
+    return {'content': ''.join(text) or None,
+            'reasoning': '\n\n'.join(reasoning) or None, 'tool_calls': calls}
+
+
 def _decode_json(body: bytes) -> Any:
     try:
         return json.loads(body)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
@@ -251,13 +285,16 @@ def _tool_results(requests: list[dict[str, Any]], calls: list[dict[str, Any]]) -
     call_names = {call.get('id'): call.get('name') for call in calls if call.get('id')}
     found: dict[str, dict[str, Any]] = {}
     for request in requests:
-        for message in request.get('messages', []):
-            if message.get('role') not in {'tool', 'tool_responses'}:
+        for message in request.get('messages') or request.get('input') or []:
+            if not isinstance(message, dict):
                 continue
-            call_id = message.get('tool_call_id')
+            is_tool = message.get('role') in {'tool', 'tool_responses'}
+            if not is_tool and message.get('type') != 'function_call_output':
+                continue
+            call_id = message.get('tool_call_id') or message.get('call_id')
             if call_id not in call_names or call_id in found:
                 continue
-            raw_content = message.get('content')
+            raw_content = message.get('content') if is_tool else message.get('output')
             parsed_content = _decode_json(raw_content.encode()) if isinstance(raw_content, str) else raw_content
             found[call_id] = {
                 'tool_call_id': call_id,

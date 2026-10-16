@@ -75,8 +75,22 @@ def provider_key(provider: str) -> str:
     raise ValueError(f'Set {names} in .env')
 
 
+OPENAI_UNSUPPORTED_FIELDS = ('chat_template_kwargs', 'thinking_token_budget',
+                             'temperature', 'top_p', 'seed')
+
+
+def openai_request_rewriter(body: dict) -> dict:
+    """Drop vLLM-only and fixed-sampling fields that OpenAI reasoning models reject."""
+    body = {k: v for k, v in body.items() if k not in OPENAI_UNSUPPORTED_FIELDS}
+    if 'max_tokens' in body:
+        body['max_completion_tokens'] = body.pop('max_tokens')
+    if isinstance(body.get('reasoning'), dict):
+        body['reasoning'].setdefault('summary', 'detailed')
+    return body
+
+
 def build_model_registry(api_base: str, api_key: str, model: str,
-                         agent_dir: Path) -> ModelRegistry:
+                         agent_dir: Path, reasoning_effort: str | None = None) -> ModelRegistry:
     """Register the serving name and submission-declared aliases locally."""
     models = ModelRegistry()
     aliases = {model}
@@ -84,10 +98,11 @@ def build_model_registry(api_base: str, api_key: str, model: str,
         match = re.search(r'^model:\s*([^\s#]+)', config_path.read_text(), re.MULTILINE)
         if match:
             aliases.add(match.group(1).strip('"\''))
+    extra = {'reasoning_effort': reasoning_effort} if reasoning_effort else {}
     for alias in aliases:
         models.register(alias, LiteLlm(
             model=model, api_base=api_base, api_key=api_key,
-            num_retries=2,
+            num_retries=2, **extra,
         ))
     return models
 
@@ -141,6 +156,8 @@ def arguments():
                    help='Override max_output_tokens from the submission sampling config.')
     p.add_argument('--temperature', type=float,
                    help='Override temperature from the submission sampling config.')
+    p.add_argument('--reasoning-effort', choices=('minimal', 'low', 'medium', 'high'),
+                   help='Reasoning effort sent to reasoning models (OpenAI provider).')
     p.add_argument('--skip-langfuse', action='store_true',
                    help='Do not upload the completed local trace even when Langfuse is configured.')
     p.add_argument('--langfuse-session-id',
@@ -356,13 +373,17 @@ async def run_one(args, working, agent_dir, key, task, index, total):
     (snapshots / f'{task.instance_id}.tgz').symlink_to(snapshot.resolve())
     task_logs = args.logs / task.instance_id
     task_results = task_logs / 'results'
-    proxy = VllmTraceProxy(args.api_base)
+    proxy = VllmTraceProxy(
+        args.api_base,
+        request_rewriter=openai_request_rewriter if args.provider == 'openai' else None,
+    )
     proxy.start()
     config = EvalConfig(
         tasks_path=args.tasks, snapshots_dir=snapshots, submission_dir=agent_dir,
         results_dir=task_logs, graph_dir=str(graph.parent),
         embeddings_dir=str(embeddings.parent), wheels_dir=wheels,
-        models=build_model_registry(proxy.api_base, key, args.litellm_model, agent_dir),
+        models=build_model_registry(proxy.api_base, key, args.litellm_model, agent_dir,
+                                    args.reasoning_effort),
         task_ids=[task.instance_id], sandbox='docker', image='swebench-sandbox:latest',
         max_tool_calls=args.max_tool_calls, max_time_minutes=args.max_minutes,
         timeout_seconds=args.timeout_seconds, max_turns=args.max_turns,
@@ -389,10 +410,18 @@ async def run_one(args, working, agent_dir, key, task, index, total):
         proxy.stop()
         final = {'result': result.model_dump(
             mode='json', exclude={'trace', 'test_output'}) if 'result' in locals() else None}
+        task_logs.mkdir(parents=True, exist_ok=True)
+        (task_logs / f'{args.provider}_exchanges.json').write_text(
+            json.dumps(proxy.exchanges, indent=2) + '\n')
         proxy.write_trace(
             task_logs / 'model_trace.json',
             run={'task_id': task.instance_id, 'provider': args.provider,
-                 'model': args.litellm_model, 'upstream_api_base': args.api_base},
+                 'model': args.litellm_model, 'upstream_api_base': args.api_base,
+                 'trace_capture': 'openai-responses-proxy' if 'responses/' in args.litellm_model
+                 else 'litellm-proxy',
+                 'reasoning_effort': args.reasoning_effort,
+                 'sampling': {'max_output_tokens': args.max_output_tokens,
+                              'reasoning_summary': 'detailed' if args.provider == 'openai' else None}},
             final=final,
         )
 
