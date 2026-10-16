@@ -1,0 +1,111 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..fe3c2bed 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,16 +155,33 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(
++        self, errors: Sequence[Any], *, endpoint_context: Optional[str] = None
++    ) -> None:
+         self._errors = errors
++        self.endpoint_context = endpoint_context
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self.endpoint_context:
++            message += f"Endpoint context: {self.endpoint_context}"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_context: Optional[str] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+         self.body = body
+ 
+ 
+@@ -173,12 +190,12 @@ class WebSocketRequestValidationError(ValidationException):
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_context: Optional[str] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+         self.body = body
+-
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..d0e55b0a 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -212,6 +212,25 @@ def _merge_lifespan_context(
+     return merged_lifespan  # type: ignore[return-value]
+ 
+ 
++@functools.lru_cache
++def _get_endpoint_source_context(endpoint: Callable[..., Any]) -> str:
++    source_file = inspect.getsourcefile(endpoint) or "<unknown>"
++    try:
++        _, line_number = inspect.getsourcelines(endpoint)
++    except (OSError, TypeError):
++        line_number = 0
++    return f'File "{source_file}", line {line_number}, in {get_name(endpoint)}'
++
++
++def _get_endpoint_context(
++    endpoint: Callable[..., Any], path: str, methods: Optional[Set[str]] = None
++) -> str:
++    source_context = _get_endpoint_source_context(endpoint)
++    if methods:
++        return f"{source_context} ({', '.join(sorted(methods))} {path})"
++    return f"{source_context} ({path})"
++
++
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
+@@ -223,6 +242,7 @@ async def serialize_response(
+     exclude_defaults: bool = False,
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
++    endpoint_context: Optional[str] = None,
+ ) -> Any:
+     if field:
+         errors = []
+@@ -246,7 +266,9 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors),
++                body=response_content,
++                endpoint_context=endpoint_context,
+             )
+ 
+         if hasattr(field, "serialize"):

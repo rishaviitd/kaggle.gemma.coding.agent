@@ -1,0 +1,125 @@
+diff --git a/src/ahttpx/_parsers.py b/src/ahttpx/_parsers.py
+index 8a52a56..7e542d8 100644
+--- a/src/ahttpx/_parsers.py
++++ b/src/ahttpx/_parsers.py
+@@ -375,7 +375,7 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    async def complete(self):
++    async def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+         is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+@@ -404,6 +404,10 @@ class HTTPParser:
+             self.recv_state = State.CLOSED
+             await self.stream.close()
+ 
++    @property
++    def keep_alive(self) -> bool:
++        return self.recv_keep_alive
++
+     def is_idle(self) -> bool:
+         return (
+             self.send_state == State.SEND_METHOD_LINE or
+diff --git a/src/ahttpx/_server.py b/src/ahttpx/_server.py
+index a9103cc..5907815 100644
+--- a/src/ahttpx/_server.py
++++ b/src/ahttpx/_server.py
+@@ -31,7 +31,7 @@ class HTTPConnection:
+     # API entry points...
+     async def handle_requests(self):
+         try:
+-            while not self._parser.is_closed():
++            while not self._parser.is_closed() and self._parser.keep_alive:
+                 method, url, headers = await self._recv_head()
+                 stream = HTTPStream(self._recv_body, self._complete)
+                 # TODO: Handle endpoint exceptions
+@@ -53,7 +53,7 @@ class HTTPConnection:
+             logger.error("Internal Server Error", exc_info=True)
+ 
+     async def close(self):
+-        self._parser.close()
++        await self._parser.close()
+ 
+     # Receive the request...
+     async def _recv_head(self) -> tuple[str, str, list[tuple[str, str]]]:
+@@ -89,7 +89,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     async def _complete(self):
+-        await self._parser.complete
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -106,7 +106,10 @@ class HTTPServer:
+ async def serve_http(endpoint):
+     async def handler(stream):
+         connection = HTTPConnection(stream, endpoint)
+-        await connection.handle_requests()
++        try:
++            await connection.handle_requests()
++        finally:
++            await connection.close()
+ 
+     logging.basicConfig(
+         format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..d109501 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -375,7 +375,7 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+         is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+@@ -404,6 +404,10 @@ class HTTPParser:
+             self.recv_state = State.CLOSED
+             self.stream.close()
+ 
++    @property
++    def keep_alive(self) -> bool:
++        return self.recv_keep_alive
++
+     def is_idle(self) -> bool:
+         return (
+             self.send_state == State.SEND_METHOD_LINE or
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..fb9e577 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -31,7 +31,7 @@ class HTTPConnection:
+     # API entry points...
+     def handle_requests(self):
+         try:
+-            while not self._parser.is_closed():
++            while not self._parser.is_closed() and self._parser.keep_alive:
+                 method, url, headers = self._recv_head()
+                 stream = HTTPStream(self._recv_body, self._complete)
+                 # TODO: Handle endpoint exceptions
+@@ -89,7 +89,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -106,7 +106,10 @@ class HTTPServer:
+ def serve_http(endpoint):
+     def handler(stream):
+         connection = HTTPConnection(stream, endpoint)
+-        connection.handle_requests()
++        try:
++            connection.handle_requests()
++        finally:
++            connection.close()
+ 
+     logging.basicConfig(
+         format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
