@@ -1,5 +1,9 @@
 # Changelog
 
+## eval — 2026-10-17 (12B pass@3)
+
+- Finished 3 samples each of itr-1 and inspiration-one on Gemma 4 12B, 4 workers, same 20 val tasks. itr-1 solved 4, 4, 2 (union 6). inspiration-one solved 4, 3, 3 (union 5). Summary: `logs/remote/rishav/pass3-12b/summary.json`.
+
 ## eval — 2026-10-17 (pass@3)
 
 - Started 3 repeats each of itr-1 and inspiration-one on the same 20 val tasks, 8 workers. Summary will land in `logs/remote/rishav/pass3-e4b/summary.json`.
