@@ -4,9 +4,14 @@ const vm=require('node:vm');
 const html=fs.readFileSync('index.html','utf8');
 assert.ok(html.includes('trace-formats.js'),'viewer must load provider normalizers');
 const context={};vm.createContext(context);vm.runInContext(fs.readFileSync('trace-formats.js','utf8'),context);
-const task='logs/remote/rishav/itr-1_v3_graph-ignore/gemini-3p8-flash-20261015/val/fastapi_12942/';
-const native=JSON.parse(fs.readFileSync(task+'gemini_exchanges.json'));
-const base=JSON.parse(fs.readFileSync(task+'model_trace.json'));
+const native=[
+  {request:{contents:[{role:'user',parts:[{text:'Read example.py'}]}]},response_status:200,
+    response:{candidates:[{content:{parts:[{thought:true,text:'Inspect the file'},
+      {function_call:{id:'call_1',name:'read_file',args:{filepath:'example.py'}}}]}}]}},
+  {request:{contents:[{role:'user',parts:[{function_response:{id:'call_1',name:'read_file',response:{content:'print(1)'}}}]}]},
+    response_status:503,response:{}},
+];
+const base={run:{task_id:'fastapi_12942'}};
 const trace=vm.runInContext('TraceFormats',context).normalize(base,native,{task_id:'fastapi_12942'});
 assert.equal(trace.turns.length,native.length);
 assert.ok(trace.turns.some(t=>t.output.reasoning.length>0),'returned thoughts must render');
