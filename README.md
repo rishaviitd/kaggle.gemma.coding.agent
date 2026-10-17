@@ -292,6 +292,11 @@ The GitHub Pages UI reads the committed `trace-index.json`. Regenerate it after 
 
 The static index includes train traces only by default, matching the artifacts committed under `logs/remote/base/train/`.
 
+To convert raw Anthropic task folders into Gemma 4 SFT examples with token-level
+loss masks, use [`scripts/export_sft.py`](scripts/export_sft.py). See the
+[SFT export guide](scripts/SFT_EXPORT.md) for commands, output format, and cited
+template/training references.
+
 ### Launch Kaggle, download its output, and upload its trace
 
 From the repository root, push and monitor the offline competition notebook:
