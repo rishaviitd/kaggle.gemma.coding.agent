@@ -68,6 +68,10 @@
       .trace-outcome h2{margin:0 0 8px;font:700 22px var(--font-body)}
       .trace-outcome p{margin:4px 0;font:15px/1.5 var(--font-body)}
       .trace-outcome strong{font-weight:700}
+      .trace-turn--failed{border-color:#c2410c;box-shadow:4px 4px 0 #c2410c;background:#fff7ed}
+      .trace-turn--failed summary{background:#ffedd5;color:#7c2d12}
+      .trace-failure-reason{display:block;margin-top:8px;padding:8px 12px;border:1.5px solid #9a3412;border-radius:8px;background:#ea580c;color:#fff;font:700 14px/1.45 var(--font-body);overflow-wrap:anywhere}
+
       @media(max-width:600px){.app-header{align-items:center;padding:10px 16px}.app-header__actions{width:100%;justify-content:center}.app-tabs{flex:1;width:auto}.app-tab{flex:1;padding:8px}.app-view{height:calc(100vh - 72px)}.home-screen{height:100vh;padding:36px 20px}.home-choices{grid-template-columns:1fr;gap:16px}.home-choice{min-height:170px}.app-view--traces{padding:12px}.trace-heading{align-items:flex-start;flex-direction:column}.trace-select-filter,.trace-select-filter--short,.trace-select-filter--task{width:100%}.trace-block{padding:0 10px 12px}.trace-turn summary{font-size:16px}}
     </style>
   </head>
@@ -279,6 +283,36 @@
         formattedButton.onclick = () => setMode(false); rawButton.onclick = () => setMode(true);
         return box;
       }
+      const firstLine = (s) => String(s ?? "").split("\n").map((line) => line.trim()).find(Boolean) || "";
+      const clip = (s, max = 240) => (s.length > max ? `${s.slice(0, max)}…` : s);
+      function parseToolPayload(value) {
+        let output = value;
+        if (output && typeof output === "object" && typeof output.result === "string") { try { output = JSON.parse(output.result); } catch {} }
+        if (typeof output === "string") { try { output = JSON.parse(output); } catch {} }
+        return output;
+      }
+      function toolFailureReason(result) {
+        const output = parseToolPayload(result.output ?? result.content ?? result.output_raw_json);
+        if (typeof output === "string") return /^(error|traceback)\b/i.test(output.trim()) ? firstLine(output) : null;
+        if (!output || typeof output !== "object") return null;
+        if (output.error) return firstLine(typeof output.error === "string" ? output.error : JSON.stringify(output.error));
+        if (output.timed_out === true) return "timed out";
+        const stderr = output.stderr ? ` — ${firstLine(output.stderr)}` : "";
+        if (typeof output.exit_code === "number" && output.exit_code !== 0) return `exit code ${output.exit_code}${stderr}`;
+        if (typeof output.status === "string" && /^(error|failed|failure)$/i.test(output.status)) return `status ${output.status}${stderr}`;
+        return null;
+      }
+      function turnFailureReasons(turn) {
+        const reasons = [];
+        const out = turn.output || {};
+        if (out.error) reasons.push(`Model error: ${clip(firstLine(typeof out.error === "string" ? out.error : JSON.stringify(out.error)))}`);
+        else if (typeof out.response_status === "number" && out.response_status >= 400) reasons.push(`Model HTTP ${out.response_status}`);
+        for (const result of (turn.tool_results || [])) {
+          const reason = toolFailureReason(result);
+          if (reason) reasons.push(`${result.name || "tool"}: ${clip(reason)}`);
+        }
+        return reasons;
+      }
       function showTrace(trace) {
         const result = trace.final?.result;
         document.getElementById("trace-title").textContent = trace.run?.task_id || "Model traces";
@@ -290,7 +324,14 @@
           previousMessages = expanded.messages;
           previousTurn = turn;
           const details = document.createElement("details"); details.className = "trace-turn"; details.open = true;
-          const summary = document.createElement("summary"); summary.textContent = `Turn ${turn.turn}: ${turn.output?.tool_calls?.[0]?.name || "assistant response"}`; details.append(summary);
+          const summary = document.createElement("summary"); summary.textContent = `Turn ${turn.turn}: ${turn.output?.tool_calls?.[0]?.name || "assistant response"}`;
+          const failures = turnFailureReasons(turn);
+          if (failures.length) {
+            details.classList.add("trace-turn--failed");
+            const reason = document.createElement("span"); reason.className = "trace-failure-reason"; reason.textContent = `⚠ Failed: ${failures.join(" · ")}`;
+            summary.append(reason);
+          }
+          details.append(summary);
           details.append(block("Model Input", expanded.request, formattedInput(expanded.request)));
           details.append(block("Model Output", turn.output, formattedOutput(turn.output)));
           details.append(block("Tool Results", turn.tool_results, formattedTools(turn.tool_results)));
