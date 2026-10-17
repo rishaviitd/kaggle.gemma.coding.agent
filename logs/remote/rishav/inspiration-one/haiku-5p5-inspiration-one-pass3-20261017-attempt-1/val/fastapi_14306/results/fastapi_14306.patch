@@ -1,0 +1,230 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..29a10452 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,30 +155,55 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(
++        self, errors: Sequence[Any], *, endpoint_ctx: Optional[str] = None
++    ) -> None:
+         self._errors = errors
++        self._endpoint_ctx = endpoint_ctx
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def _append_endpoint_ctx(self, message: str) -> str:
++        # Server-side logging only: this is never included in HTTP responses.
++        if self._endpoint_ctx:
++            return f"{message}\n{self._endpoint_ctx}"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_ctx: Optional[str] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_ctx=endpoint_ctx)
+         self.body = body
+ 
++    def __str__(self) -> str:
++        return self._append_endpoint_ctx(super().__str__())
++
+ 
+ class WebSocketRequestValidationError(ValidationException):
+-    pass
++    def __str__(self) -> str:
++        return self._append_endpoint_ctx(super().__str__())
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_ctx: Optional[str] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_ctx=endpoint_ctx)
+         self.body = body
+ 
+     def __str__(self) -> str:
+         message = f"{len(self._errors)} validation errors:\n"
+         for err in self._errors:
+             message += f"  {err}\n"
+-        return message
++        return self._append_endpoint_ctx(message)
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..e08e0f4b 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -212,6 +212,23 @@ def _merge_lifespan_context(
+     return merged_lifespan  # type: ignore[return-value]
+ 
+ 
++def _get_endpoint_context(
++    endpoint: Callable[..., Any], *, method: Optional[str], path: str
++) -> Optional[str]:
++    try:
++        source_file = inspect.getsourcefile(endpoint) or inspect.getfile(endpoint)
++        _, line_no = inspect.getsourcelines(endpoint)
++    except (TypeError, OSError):
++        source_file, line_no = "<unknown>", 0
++    func_name = getattr(endpoint, "__name__", repr(endpoint))
++    route = f"{method} {path}" if method else path
++    return (
++        "Endpoint context:\n"
++        f'  File "{source_file}", line {line_no}, in {func_name}\n'
++        f"  Route: {route}"
++    )
++
++
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
+@@ -223,6 +240,7 @@ async def serialize_response(
+     exclude_defaults: bool = False,
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
++    endpoint_ctx: Optional[str] = None,
+ ) -> Any:
+     if field:
+         errors = []
+@@ -246,7 +264,9 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors),
++                body=response_content,
++                endpoint_ctx=endpoint_ctx,
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -286,6 +306,23 @@ async def run_endpoint_function(
+         return await run_in_threadpool(dependant.call, **values)
+ 
+ 
++def _get_endpoint_context(
++    endpoint: Callable[..., Any], *, method: Optional[str], path: str
++) -> Optional[str]:
++    """
++    Build a traceback-style description of an endpoint for server-side logs.
++    Returns None if the source location can't be determined.
++    """
++    try:
++        source_file = inspect.getsourcefile(endpoint) or inspect.getfile(endpoint)
++        line_no = inspect.getsourcelines(endpoint)[1]
++    except (TypeError, OSError):
++        return None
++    name = getattr(endpoint, "__name__", type(endpoint).__name__)
++    route = f"{method} {path}" if method else path
++    return f'  File "{source_file}", line {line_no}, in {name}\n    {route}'
++
++
+ def get_request_handler(
+     dependant: Dependant,
+     body_field: Optional[ModelField] = None,
+@@ -300,6 +337,7 @@ def get_request_handler(
+     response_model_exclude_none: bool = False,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_ctx: Optional[str] = None,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
+     is_coroutine = dependant.is_coroutine_callable
+@@ -345,7 +383,8 @@ def get_request_handler(
+                             body = body_bytes
+         except json.JSONDecodeError as e:
+             validation_error = RequestValidationError(
+-                [
++                endpoint_ctx=endpoint_ctx,
++                errors=[
+                     {
+                         "type": "json_invalid",
+                         "loc": ("body", e.pos),
+@@ -405,6 +444,7 @@ def get_request_handler(
+                 if solved_result.response.status_code:
+                     response_args["status_code"] = solved_result.response.status_code
+                 content = await serialize_response(
++                endpoint_ctx=endpoint_ctx,
+                     field=response_field,
+                     response_content=raw_response,
+                     include=response_model_include,
+@@ -421,7 +461,7 @@ def get_request_handler(
+                 response.headers.raw.extend(solved_result.response.headers.raw)
+         if errors:
+             validation_error = RequestValidationError(
+-                _normalize_errors(errors), body=body
++                _normalize_errors(errors), body=body, endpoint_ctx=endpoint_ctx
+             )
+             raise validation_error
+ 
+@@ -436,6 +476,7 @@ def get_websocket_app(
+     dependant: Dependant,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_ctx: Optional[str] = None,
+ ) -> Callable[[WebSocket], Coroutine[Any, Any, Any]]:
+     async def app(websocket: WebSocket) -> None:
+         async_exit_stack = websocket.scope.get("fastapi_inner_astack")
+@@ -451,7 +492,8 @@ def get_websocket_app(
+         )
+         if solved_result.errors:
+             raise WebSocketRequestValidationError(
+-                _normalize_errors(solved_result.errors)
++                _normalize_errors(solved_result.errors),
++                endpoint_ctx=endpoint_ctx,
+             )
+         assert dependant.call is not None, "dependant.call must be a function"
+         await dependant.call(**solved_result.values)
+@@ -486,8 +528,15 @@ class APIWebSocketRoute(routing.WebSocketRoute):
+         self._embed_body_fields = _should_embed_body_fields(
+             self._flat_dependant.body_params
+         )
++        self._endpoint_ctx = _get_endpoint_context(
++            self.endpoint, method=None, path=self.path
++        )
++        self._endpoint_ctx = _get_endpoint_context(
++            self.endpoint, method="WS", path=self.path
++        )
+         self.app = websocket_session(
+             get_websocket_app(
++                endpoint_ctx=self._endpoint_ctx,
+                 dependant=self.dependant,
+                 dependency_overrides_provider=dependency_overrides_provider,
+                 embed_body_fields=self._embed_body_fields,
+@@ -644,10 +693,22 @@ class APIRoute(routing.Route):
+             name=self.unique_id,
+             embed_body_fields=self._embed_body_fields,
+         )
++        # Computed once per route and cached, so requests don't pay for it.
++        self._endpoint_ctx = _get_endpoint_context(
++            self.endpoint,
++            method=", ".join(sorted(self.methods)) if self.methods else None,
++            path=self.path,
++        )
++        self._endpoint_ctx = _get_endpoint_context(
++            self.endpoint,
++            method=",".join(sorted(self.methods or [])),
++            path=self.path,
++        )
+         self.app = request_response(self.get_route_handler())
+ 
+     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+         return get_request_handler(
++            endpoint_ctx=self._endpoint_ctx,
+             dependant=self.dependant,
+             body_field=self.body_field,
+             status_code=self.status_code,

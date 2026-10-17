@@ -20,6 +20,9 @@ from typing import Any
 TRACE_NAME = "model_trace.json"
 TRACE_NAMES = (TRACE_NAME, "gemini_exchanges.json", "azure_exchanges.json",
                "bedrock_exchanges.json", "agent_trace.json")
+NATIVE_TRACE_NAMES = ("gemini_exchanges.json", "azure_exchanges.json",
+                      "bedrock_exchanges.json", "anthropic_exchanges.json",
+                      "openai_exchanges.json")
 SPLITS = ("train", "dev", "val")
 
 
@@ -67,7 +70,7 @@ def build_index(project_root: Path, trace_root: Path) -> dict[str, Any]:
         }
         if interrupted:
             entry["interrupted"] = True
-        for name in TRACE_NAMES[1:4]:
+        for name in NATIVE_TRACE_NAMES:
             if (task_dir/name).is_file():
                 entry["native_path"] = (task_dir/name).relative_to(project_root).as_posix()
                 break

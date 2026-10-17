@@ -1,0 +1,220 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..89fc7262 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -4,7 +4,7 @@ from annotated_doc import Doc
+ from pydantic import BaseModel, create_model
+ from starlette.exceptions import HTTPException as StarletteHTTPException
+ from starlette.exceptions import WebSocketException as StarletteWebSocketException
+-from typing_extensions import Annotated
++from typing_extensions import Annotated, TypedDict
+ 
+ 
+ class HTTPException(StarletteHTTPException):
+@@ -154,17 +154,50 @@ class DependencyScopeError(FastAPIError):
+     """
+ 
+ 
++class EndpointContext(TypedDict, total=False):
++    function: str
++    path: str
++    file: str
++    line: int
++
++
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        endpoint_ctx: Optional[EndpointContext] = None,
++    ) -> None:
+         self._errors = errors
++        self.endpoint_ctx = endpoint_ctx or EndpointContext()
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        ctx = self.endpoint_ctx
++        if ctx.get("file") and ctx.get("function"):
++            message += (
++                f'\n  File "{ctx["file"]}", line {ctx.get("line")}, '
++                f"in {ctx['function']}\n"
++            )
++            if ctx.get("path"):
++                message += f"    {ctx['path']}\n"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_ctx: Optional[EndpointContext] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_ctx=endpoint_ctx)
+         self.body = body
+ 
+ 
+@@ -173,12 +206,12 @@ class WebSocketRequestValidationError(ValidationException):
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_ctx: Optional[EndpointContext] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_ctx=endpoint_ctx)
+         self.body = body
+-
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..8bde005d 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -46,6 +46,7 @@ from fastapi.dependencies.utils import (
+ )
+ from fastapi.encoders import jsonable_encoder
+ from fastapi.exceptions import (
++    EndpointContext,
+     FastAPIError,
+     RequestValidationError,
+     ResponseValidationError,
+@@ -212,6 +213,20 @@ def _merge_lifespan_context(
+     return merged_lifespan  # type: ignore[return-value]
+ 
+ 
++def _extract_endpoint_context(func: Any, *, path: str) -> EndpointContext:
++    try:
++        unwrapped = inspect.unwrap(func)
++        code = unwrapped.__code__
++        return EndpointContext(
++            function=unwrapped.__name__,
++            path=path,
++            file=code.co_filename,
++            line=code.co_firstlineno,
++        )
++    except Exception:
++        return EndpointContext()
++
++
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
+@@ -223,6 +238,7 @@ async def serialize_response(
+     exclude_defaults: bool = False,
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
++    endpoint_ctx: Optional[EndpointContext] = None,
+ ) -> Any:
+     if field:
+         errors = []
+@@ -246,7 +262,9 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors),
++                body=response_content,
++                endpoint_ctx=endpoint_ctx,
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -300,6 +318,7 @@ def get_request_handler(
+     response_model_exclude_none: bool = False,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_ctx: Optional[EndpointContext] = None,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
+     is_coroutine = dependant.is_coroutine_callable
+@@ -414,6 +433,7 @@ def get_request_handler(
+                     exclude_defaults=response_model_exclude_defaults,
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
++                    endpoint_ctx=endpoint_ctx,
+                 )
+                 response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+@@ -421,7 +441,7 @@ def get_request_handler(
+                 response.headers.raw.extend(solved_result.response.headers.raw)
+         if errors:
+             validation_error = RequestValidationError(
+-                _normalize_errors(errors), body=body
++                _normalize_errors(errors), body=body, endpoint_ctx=endpoint_ctx
+             )
+             raise validation_error
+ 
+@@ -436,6 +456,7 @@ def get_websocket_app(
+     dependant: Dependant,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_ctx: Optional[EndpointContext] = None,
+ ) -> Callable[[WebSocket], Coroutine[Any, Any, Any]]:
+     async def app(websocket: WebSocket) -> None:
+         async_exit_stack = websocket.scope.get("fastapi_inner_astack")
+@@ -451,7 +472,8 @@ def get_websocket_app(
+         )
+         if solved_result.errors:
+             raise WebSocketRequestValidationError(
+-                _normalize_errors(solved_result.errors)
++                _normalize_errors(solved_result.errors),
++                endpoint_ctx=endpoint_ctx,
+             )
+         assert dependant.call is not None, "dependant.call must be a function"
+         await dependant.call(**solved_result.values)
+@@ -474,6 +496,9 @@ class APIWebSocketRoute(routing.WebSocketRoute):
+         self.name = get_name(endpoint) if name is None else name
+         self.dependencies = list(dependencies or [])
+         self.path_regex, self.path_format, self.param_convertors = compile_path(path)
++        self._endpoint_context = _extract_endpoint_context(
++            self.endpoint, path=f"WS {self.path_format}"
++        )
+         self.dependant = get_dependant(
+             path=self.path_format, call=self.endpoint, scope="function"
+         )
+@@ -491,6 +516,7 @@ class APIWebSocketRoute(routing.WebSocketRoute):
+                 dependant=self.dependant,
+                 dependency_overrides_provider=dependency_overrides_provider,
+                 embed_body_fields=self._embed_body_fields,
++                endpoint_ctx=self._endpoint_context,
+             )
+         )
+ 
+@@ -568,6 +594,10 @@ class APIRoute(routing.Route):
+         if methods is None:
+             methods = ["GET"]
+         self.methods: Set[str] = {method.upper() for method in methods}
++        self._endpoint_context = _extract_endpoint_context(
++            self.endpoint,
++            path=f"{', '.join(sorted(self.methods))} {self.path_format}",
++        )
+         if isinstance(generate_unique_id_function, DefaultPlaceholder):
+             current_generate_unique_id: Callable[[APIRoute], str] = (
+                 generate_unique_id_function.value
+@@ -649,6 +679,7 @@ class APIRoute(routing.Route):
+     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+         return get_request_handler(
+             dependant=self.dependant,
++            endpoint_ctx=self._endpoint_context,
+             body_field=self.body_field,
+             status_code=self.status_code,
+             response_class=self.response_class,

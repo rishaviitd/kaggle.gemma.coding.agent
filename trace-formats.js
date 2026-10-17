@@ -11,7 +11,36 @@ const TraceFormats = (() => {
       tool_responses: parts.filter(p => p.function_response).map(p => p.function_response)};
   }
   function normalize(trace, native, entry) {
-    if (trace?.turns?.length && trace.turns[0].output) return trace;
+    if (trace?.turns?.length && trace.turns[0].output) {
+      if (!Array.isArray(native)) return trace;
+      let changed = false;
+      const turns = trace.turns.map((turn, i) => {
+        if (turn.tool_results?.length || !turn.output?.tool_calls?.length) return turn;
+        const calls = turn.output.tool_calls;
+        const ids = new Map(calls.filter(call => call.id).map(call => [call.id, call.name]));
+        const request = native[i + 1]?.request || {};
+        const messages = request.messages || request.input || [];
+        const results = [];
+        for (const msg of messages) {
+          if (Array.isArray(msg.content)) {
+            for (const part of msg.content) {
+              if (part.type !== 'tool_result' || !ids.has(part.tool_use_id)) continue;
+              results.push({tool_call_id:part.tool_use_id,name:ids.get(part.tool_use_id),output:part.content,output_raw_json:part.content});
+            }
+          }
+          if (msg.type === 'function_call_output' && ids.has(msg.call_id)) {
+            results.push({tool_call_id:msg.call_id,name:ids.get(msg.call_id),output:msg.output,output_raw_json:msg.output});
+          }
+          if (msg.role === 'tool' && ids.has(msg.tool_call_id)) {
+            results.push({tool_call_id:msg.tool_call_id,name:ids.get(msg.tool_call_id),output:msg.content,output_raw_json:msg.content});
+          }
+        }
+        if (!results.length) return turn;
+        changed = true;
+        return {...turn,tool_results:results};
+      });
+      return changed ? {...trace,turns} : trace;
+    }
     const base = {run: {task_id: entry.task_id}, ...(!Array.isArray(trace) ? trace : {})};
     if (!Array.isArray(native)) native = Array.isArray(trace) ? trace : [];
     if (!native.length && base.turns?.length) {

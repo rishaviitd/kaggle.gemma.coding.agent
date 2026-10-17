@@ -1,0 +1,113 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..ad6e0eef 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,16 +155,35 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(
++        self, errors: Sequence[Any], *, endpoint_context: Optional[str] = None
++    ) -> None:
+         self._errors = errors
++        self.endpoint_context = endpoint_context
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def __str__(self) -> str:
++        count = len(self._errors)
++        suffix = "" if count == 1 else "s"
++        message = f"{count} validation error{suffix}:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self.endpoint_context:
++            message += f"\n  {self.endpoint_context}"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_context: Optional[str] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+         self.body = body
+ 
+ 
+@@ -173,12 +192,12 @@ class WebSocketRequestValidationError(ValidationException):
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+-        super().__init__(errors)
++    def __init__(
++        self,
++        errors: Sequence[Any],
++        *,
++        body: Any = None,
++        endpoint_context: Optional[str] = None,
++    ) -> None:
++        super().__init__(errors, endpoint_context=endpoint_context)
+         self.body = body
+-
+-    def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..4cc39b99 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -79,6 +79,25 @@ from starlette.websockets import WebSocket
+ from typing_extensions import Annotated, deprecated
+ 
+ 
++@functools.lru_cache(maxsize=None)
++def _get_endpoint_source(endpoint: Callable[..., Any]) -> Tuple[str, int, str]:
++    try:
++        filename = inspect.getsourcefile(endpoint)
++        line_number = inspect.getsourcelines(endpoint)[1]
++    except (OSError, TypeError):
++        return "", 0, getattr(endpoint, "__name__", "<unknown>")
++    return filename or "", line_number, getattr(endpoint, "__name__", "<unknown>")
++
++
++def _get_endpoint_context(
++    endpoint: Callable[..., Any], method: str, path: str
++) -> str:
++    filename, line_number, name = _get_endpoint_source(endpoint)
++    if not filename:
++        return f"{method} {path}"
++    return f'File "{filename}", line {line_number}, in {name}\n    {method} {path}'
++
++
+ # Copy of starlette.routing.request_response modified to include the
+ # dependencies' AsyncExitStack
+ def request_response(
+@@ -246,7 +265,9 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors),
++                body=response_content,
++                endpoint_context=endpoint_context,
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -300,6 +321,7 @@ def get_request_handler(
+     response_model_exclude_none: bool = False,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
++    endpoint_context: Optional[str] = None,
+ ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+     assert dependant.call is not None, "dependant.call must be a function"
+     is_coroutine = dependant.is_coroutine_callable

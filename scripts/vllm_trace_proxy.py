@@ -288,6 +288,25 @@ def _tool_results(requests: list[dict[str, Any]], calls: list[dict[str, Any]]) -
         for message in request.get('messages') or request.get('input') or []:
             if not isinstance(message, dict):
                 continue
+            # Anthropic returns tool output as content blocks on a user message.
+            blocks = message.get('content')
+            if isinstance(blocks, list):
+                for block in blocks:
+                    if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                        continue
+                    call_id = block.get('tool_use_id')
+                    if call_id not in call_names or call_id in found:
+                        continue
+                    raw_content = block.get('content')
+                    parsed_content = _decode_json(raw_content.encode()) if isinstance(raw_content, str) else raw_content
+                    found[call_id] = {
+                        'tool_call_id': call_id,
+                        'name': call_names.get(call_id),
+                        'output_raw_json': raw_content,
+                        'output': parsed_content,
+                    }
+                if len(found) == len(call_names):
+                    break
             is_tool = message.get('role') in {'tool', 'tool_responses'}
             if not is_tool and message.get('type') != 'function_call_output':
                 continue

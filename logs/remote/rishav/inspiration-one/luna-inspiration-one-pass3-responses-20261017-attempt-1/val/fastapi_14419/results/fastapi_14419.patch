@@ -1,0 +1,74 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index d6359c0f..d3c73061 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -39,16 +39,28 @@ class Dependant:
+     background_tasks_param_name: Optional[str] = None
+     security_scopes_param_name: Optional[str] = None
+     security_scopes: Optional[List[str]] = None
++    declares_security_scopes: bool = False
++    uses_security_scopes: bool = False
+     use_cache: bool = True
+     path: Optional[str] = None
+     scope: Union[Literal["function", "request"], None] = None
+ 
+     @cached_property
+     def cache_key(self) -> DependencyCacheKey:
++        security_scopes = ()
++        if self.has_security_scopes_dependency:
++            security_scopes = tuple(sorted(set(self.security_scopes or [])))
++        return (self.call, security_scopes, self.computed_scope or "")
++
++    @cached_property
++    def has_security_scopes_dependency(self) -> bool:
+         return (
+-            self.call,
+-            tuple(sorted(set(self.security_scopes or []))),
+-            self.computed_scope or "",
++            self.declares_security_scopes
++            or self.uses_security_scopes
++            or any(
++                sub_dependant.has_security_scopes_dependency
++                for sub_dependant in self.dependencies
++            )
+         )
+ 
+     @cached_property
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 45353835..5c61d8ce 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -129,12 +129,14 @@ def get_parameterless_sub_dependant(*, depends: params.Depends, path: str) -> De
+     use_security_scopes: List[str] = []
+     if isinstance(depends, params.Security) and depends.scopes:
+         use_security_scopes.extend(depends.scopes)
+-    return get_dependant(
++    dependant = get_dependant(
+         path=path,
+         call=depends.dependency,
+         scope=depends.scope,
+         security_scopes=use_security_scopes,
+     )
++    dependant.declares_security_scopes = isinstance(depends, params.Security)
++    return dependant
+ 
+ 
+ def get_flat_dependant(
+@@ -289,6 +291,9 @@ def get_dependant(
+                 use_cache=param_details.depends.use_cache,
+                 scope=param_details.depends.scope,
+             )
++            sub_dependant.declares_security_scopes = isinstance(
++                param_details.depends, params.Security
++            )
+             dependant.dependencies.append(sub_dependant)
+             continue
+         if add_non_field_param_to_dependency(
+@@ -330,6 +335,7 @@ def add_non_field_param_to_dependency(
+         return True
+     elif lenient_issubclass(type_annotation, SecurityScopes):
+         dependant.security_scopes_param_name = param_name
++        dependant.uses_security_scopes = True
+         return True
+     return None
+ 

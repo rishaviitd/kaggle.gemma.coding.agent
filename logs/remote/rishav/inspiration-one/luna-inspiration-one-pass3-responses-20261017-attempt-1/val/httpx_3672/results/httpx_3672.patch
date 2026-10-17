@@ -1,0 +1,110 @@
+diff --git a/src/ahttpx/_parsers.py b/src/ahttpx/_parsers.py
+index 8a52a56..ca2241f 100644
+--- a/src/ahttpx/_parsers.py
++++ b/src/ahttpx/_parsers.py
+@@ -375,11 +375,14 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    async def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    async def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+-        if not (is_fully_complete and is_keepalive):
++        if not (is_fully_complete and self.keep_alive):
+             await self.close()
+             return
+ 
+diff --git a/src/ahttpx/_server.py b/src/ahttpx/_server.py
+index a9103cc..50671d5 100644
+--- a/src/ahttpx/_server.py
++++ b/src/ahttpx/_server.py
+@@ -38,6 +38,8 @@ class HTTPConnection:
+                 async with Request(method, url, headers=headers, content=stream) as request:
+                     try:
+                         response = await self._endpoint(request)
++                        while self._parser.keep_alive and await self._recv_body():
++                            pass
+                         status_line = f"{request.method} {request.url.target} [{response.status_code} {response.reason_phrase}]"
+                         logger.info(status_line)
+                     except Exception:
+@@ -89,7 +91,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     async def _complete(self):
+-        await self._parser.complete
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -122,5 +124,8 @@ async def serve_http(endpoint):
+ 
+ 
+ async def run(app):
+-    async with await serve_http(app) as server:
+-        server.wait()
++    try:
++        async with await serve_http(app) as server:
++            await server.wait()
++    except KeyboardInterrupt:
++        pass
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..ec6a575 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -375,11 +375,14 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+-        if not (is_fully_complete and is_keepalive):
++        if not (is_fully_complete and self.keep_alive):
+             self.close()
+             return
+ 
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..61655c5 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -38,6 +38,8 @@ class HTTPConnection:
+                 with Request(method, url, headers=headers, content=stream) as request:
+                     try:
+                         response = self._endpoint(request)
++                        while self._parser.keep_alive and self._recv_body():
++                            pass
+                         status_line = f"{request.method} {request.url.target} [{response.status_code} {response.reason_phrase}]"
+                         logger.info(status_line)
+                     except Exception:
+@@ -89,7 +91,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -122,5 +124,8 @@ def serve_http(endpoint):
+ 
+ 
+ def run(app):
+-    with serve_http(app) as server:
+-        server.wait()
++    try:
++        with serve_http(app) as server:
++            server.wait()
++    except KeyboardInterrupt:
++        pass

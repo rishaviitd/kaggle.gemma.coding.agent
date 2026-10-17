@@ -13,6 +13,10 @@ assert.ok(trace.turns.some(t=>t.output.reasoning.length>0),'returned thoughts mu
 assert.ok(trace.turns.some(t=>t.output.tool_calls.length>0),'tool calls must render');
 assert.ok(trace.turns.some(t=>t.tool_results.length>0),'tool responses must render');
 assert.ok(trace.turns.some(t=>t.output.response_status===503),'provider errors must render');
+const anthropicTrace={turns:[{turn:1,output:{tool_calls:[{id:'toolu_1',name:'run_command'}]},tool_results:[]}]};
+const anthropicNative=[{}, {request:{messages:[{role:'user',content:[{type:'tool_result',tool_use_id:'toolu_1',content:'{"status":"ok"}'}]}]}}];
+const recovered=vm.runInContext('TraceFormats',context).normalize(anthropicTrace,anthropicNative,{task_id:'haiku'});
+assert.equal(recovered.turns[0].tool_results[0].output,'{"status":"ok"}','Anthropic results must be recovered for existing traces');
 const ordinary={turns:[{turn:1,output:{assistant_content:'existing'}}]};
 assert.equal(vm.runInContext('TraceFormats',context).normalize(ordinary,[],{}),ordinary,'existing model traces remain intact');
 console.log('Trace rendering formats passed');

@@ -1,0 +1,91 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..b091f1c9 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -155,12 +155,27 @@ class DependencyScopeError(FastAPIError):
+ 
+ 
+ class ValidationException(Exception):
+-    def __init__(self, errors: Sequence[Any]) -> None:
++    def __init__(self, errors: Sequence[Any], *, endpoint_context: Optional[str] = None) -> None:
+         self._errors = errors
++        self.endpoint_context = endpoint_context
++        super().__init__(errors)
+ 
+     def errors(self) -> Sequence[Any]:
+         return self._errors
+ 
++    def _format_errors(self) -> str:
++        count = len(self._errors)
++        message = f"{count} validation error{'s' if count != 1 else ''}:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        return message.rstrip()
++
++    def __str__(self) -> str:
++        message = self._format_errors()
++        if self.endpoint_context:
++            message += f"\n\n  {self.endpoint_context}"
++        return message
++
+ 
+ class RequestValidationError(ValidationException):
+     def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
+@@ -177,8 +192,8 @@ class ResponseValidationError(ValidationException):
+         super().__init__(errors)
+         self.body = body
+ 
+-    def __str__(self) -> str:
++    def _format_errors(self) -> str:
+         message = f"{len(self._errors)} validation errors:\n"
+         for err in self._errors:
+             message += f"  {err}\n"
+-        return message
++        return message.rstrip()
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..1a0330d2 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -3,6 +3,7 @@ import email.message
+ import functools
+ import inspect
+ import json
++import os
+ from contextlib import AsyncExitStack, asynccontextmanager
+ from enum import Enum, IntEnum
+ from typing import (
+@@ -79,6 +80,24 @@ from starlette.websockets import WebSocket
+ from typing_extensions import Annotated, deprecated
+ 
+ 
++@functools.lru_cache
++
++def _get_endpoint_source(endpoint: Callable[..., Any]) -> str:
++    endpoint = inspect.unwrap(endpoint)
++    sourcefile = inspect.getsourcefile(endpoint)
++    if sourcefile is None:
++        return ""
++    _, line_number = inspect.getsourcelines(endpoint)
++    return f'File "{os.path.abspath(sourcefile)}", line {line_number}, in {get_name(endpoint)}'
++
++
++def _get_endpoint_context(endpoint: Callable[..., Any], method: str, path: str) -> str:
++    source = _get_endpoint_source(endpoint)
++    if not source:
++        return ""
++    return f"{source}\\n    {method} {path}"
++
++
+ # Copy of starlette.routing.request_response modified to include the
+ # dependencies' AsyncExitStack
+ def request_response(
+@@ -423,6 +442,9 @@ def get_request_handler(
+             validation_error = RequestValidationError(
+                 _normalize_errors(errors), body=body
+             )
++            validation_error.endpoint_context = _get_endpoint_context(
++                dependant.call, request.method, request.url.path
++            )
+             raise validation_error
+ 
+         # Return response
