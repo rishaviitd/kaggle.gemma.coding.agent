@@ -20,6 +20,48 @@ From the repository root, using the existing `.venv`:
   --retain-reasoning --enable-thinking
 ```
 
+To prepare normalized JSON for a later Unsloth preprocessing step, without
+loading a tokenizer or generating token IDs, use:
+
+```bash
+.venv/bin/python scripts/sft_export/export_sft.py INPUT_ROOT \
+  --output "data/transient/haiku datasets v1" \
+  --conversations-only --minimal --resolved-only \
+  --retain-reasoning --enable-thinking
+```
+
+This mode creates `train.jsonl` and, with `--skip-invalid`, `rejected.jsonl`.
+With `--minimal`, each training row contains only standard `messages` and
+`tools`. Without it, rows also contain source path and SHA-256 provenance, the
+pinned Gemma template identity, and the template arguments Unsloth should apply
+later; `--source-commit` can add commit provenance. Neither mode renders the
+template, tokenizes, or creates labels.
+Per-assistant-message `_train` metadata is retained so later preprocessing can
+distinguish generated targets from assistant history carried across compaction.
+Tool messages are observations and must remain loss-masked when labels are made.
+Unsloth documents applying a chat template before response-only training in its
+[LoRA guide](https://docs.unsloth.ai/basics/lora-parameters-encyclopedia#training-on-completions-only-masking-out-inputs).
+`--minimal` limits each training row to `messages` and `tools`.
+`--resolved-only` reads the adjacent `results/<task_id>.json` and includes an
+attempt only when `resolved` is exactly `true`; missing or malformed result
+metadata fails the export rather than guessing.
+
+### Why 192 trajectories produce 220 rows
+
+The `haiku datasets v1` export contains 192 passed agent trajectories but 220
+JSONL rows. Long trajectories can invoke context compaction, replacing their
+earlier history with a summary. The exporter splits at each compaction boundary
+so every row reproduces one prompt the model actually received. Assistant
+messages carried into the post-compaction prompt remain context-only through
+`_train: false`; splitting does not create additional solutions.
+
+| Passed trajectories | Rows per trajectory | Resulting rows |
+| ---: | ---: | ---: |
+| 166 | 1 | 166 |
+| 24 | 2 | 48 |
+| 2 | 3 | 6 |
+| **192** |  | **220** |
+
 The tokenizer download requires internet; model weights are never loaded. The
 default tokenizer is `google/gemma-4-E4B-it`, pinned to revision
 `ee0ef6023621cff504d758262d4e04895a5af4a2`. For offline use, first download just
@@ -44,6 +86,10 @@ their source paths. Use a different output directory for subsequent exports.
 | `conversations.jsonl` | Reviewable normalized messages, tools, task ID, and per-message supervision metadata |
 | `text/*.txt` | Exact text produced by the official chat template, one file per example |
 | `manifest.json` | Source paths/hashes, tokenizer/template hashes, token counts, exclusions, and references |
+
+In `--conversations-only` mode, only `train.jsonl` is created unless
+`--skip-invalid` is supplied, in which case `rejected.jsonl` records sources that
+could not be normalized without inventing missing model output.
 
 The `gemma4-sft-v2` manifest records `retain_reasoning` and `enable_thinking`
 separately, replacing the ambiguous v1 `thinking` field. Existing exports are

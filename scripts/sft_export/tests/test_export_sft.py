@@ -139,6 +139,71 @@ class ReconstructionTests(unittest.TestCase):
         self.assertTrue(observation["is_error"])
         self.assertIn("OBSERVATION_ONLY", observation["content"])
 
+    def test_conversations_only_cli_writes_unsloth_json_and_rejection_audit(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            valid = root / "input" / "valid" / "anthropic_exchanges.json"
+            invalid = root / "input" / "invalid" / "anthropic_exchanges.json"
+            valid.parent.mkdir(parents=True)
+            invalid.parent.mkdir(parents=True)
+            valid.write_text(json.dumps(exchanges()))
+            truncated = exchanges()
+            truncated[-1]["response"]["stop_reason"] = "max_tokens"
+            invalid.write_text(json.dumps(truncated))
+
+            output = root / "out"
+            proc = subprocess.run([
+                sys.executable, str(Path(exporter.__file__)), str(valid.parent), str(invalid.parent),
+                "--output", str(output), "--conversations-only", "--skip-invalid",
+                "--retain-reasoning", "--enable-thinking", "--source-commit", "deadbeef",
+            ], capture_output=True, text=True)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual({p.name for p in output.iterdir()}, {"train.jsonl", "rejected.jsonl"})
+            row = json.loads((output / "train.jsonl").read_text())
+            self.assertEqual(row["task_id"], "valid")
+            self.assertIn("messages", row)
+            self.assertIn("tools", row)
+            self.assertNotIn("input_ids", row)
+            self.assertNotIn("text", row)
+            self.assertEqual(row["source_commit"], "deadbeef")
+            self.assertTrue(row["template_kwargs"]["enable_thinking"])
+            self.assertTrue(row["template_kwargs"]["preserve_thinking"])
+            self.assertEqual(row["messages"][2]["reasoning"], "Inspect first")
+            self.assertTrue(row["messages"][2]["_train"])
+            rejected = json.loads((output / "rejected.jsonl").read_text())
+            self.assertEqual(rejected["task_id"], "invalid")
+            self.assertEqual(rejected["source_commit"], "deadbeef")
+            self.assertIn("max_tokens", rejected["error"])
+
+    def test_minimal_resolved_only_export_contains_only_passed_conversations(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            inputs = []
+            for name, resolved in (("passed", True), ("failed", False)):
+                task = root / "input" / name
+                task.mkdir(parents=True)
+                (task / "anthropic_exchanges.json").write_text(json.dumps(exchanges()))
+                results = task / "results"
+                results.mkdir()
+                (results / f"{name}.json").write_text(json.dumps({"resolved": resolved}))
+                inputs.append(task)
+
+            output = root / "out"
+            proc = subprocess.run([
+                sys.executable, str(Path(exporter.__file__)), *map(str, inputs),
+                "--output", str(output), "--conversations-only", "--minimal",
+                "--resolved-only", "--retain-reasoning", "--enable-thinking",
+            ], capture_output=True, text=True)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual({p.name for p in output.iterdir()}, {"train.jsonl"})
+            rows = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(set(rows[0]), {"messages", "tools"})
+            self.assertEqual(rows[0]["messages"][2]["reasoning"], "Inspect first")
+            self.assertIn("filtered unresolved: 1", proc.stdout)
+
 
 @unittest.skipUnless(os.environ.get("GEMMA_SFT_TOKENIZER"), "Set GEMMA_SFT_TOKENIZER for official-tokenizer checks")
 class OfficialTemplateTests(unittest.TestCase):
