@@ -1,0 +1,75 @@
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..d2ad92c 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -375,14 +375,11 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
+-        is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
+-
+-        if not (is_fully_complete and is_keepalive):
+-            self.close()
+-            return
++    @property
++    def keep_alive(self) -> tuple[bool, bool]:
++        return self.send_keep_alive, self.recv_keep_alive
+ 
++    def reset(self):
+         if self.mode == Mode.CLIENT:
+             self.send_state = State.SEND_METHOD_LINE
+             self.recv_state = State.WAIT
+@@ -398,6 +395,16 @@ class HTTPParser:
+         self.recv_keep_alive = True
+         self.processing_1xx = False
+ 
++    def complete(self):
++        is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
++        is_keepalive = self.send_keep_alive and self.recv_keep_alive
++
++        if not (is_fully_complete and is_keepalive):
++            self.close()
++            return
++
++        self.reset()
++
+     def close(self):
+         if self.send_state != State.CLOSED:
+             self.send_state = State.CLOSED
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..b86e06b 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -43,6 +43,9 @@ class HTTPConnection:
+                     except Exception:
+                         logger.error("Internal Server Error", exc_info=True)
+                         content = Text("Internal Server Error")
++                        # Ensure body is fully read
++                        while stream.read():
++                            pass
+                         err = Response(code=500, content=content)
+                         self._send_head(err)
+                         self._send_body(err)
+@@ -89,7 +92,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        self._parser.complete()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -122,5 +125,9 @@ def serve_http(endpoint):
+ 
+ 
+ def run(app):
+-    with serve_http(app) as server:
+-        server.wait()
++    try:
++        with serve_http(app) as server:
++            server.wait()
++    except KeyboardInterrupt:
++        logger.info("Server stopped by user")
++
