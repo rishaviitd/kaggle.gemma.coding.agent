@@ -1,0 +1,100 @@
+diff --git a/fastapi/__init__.py b/fastapi/__init__.py
+index aac0176b..1b27c5dd 100644
+--- a/fastapi/__init__.py
++++ b/fastapi/__init__.py
+@@ -21,5 +21,7 @@ from .param_functions import Security as Security
+ from .requests import Request as Request
+ from .responses import Response as Response
+ from .routing import APIRouter as APIRouter
++from .sse import EventSourceResponse as EventSourceResponse
++from .sse import ServerSentEvent as ServerSentEvent
+ from .websockets import WebSocket as WebSocket
+ from .websockets import WebSocketDisconnect as WebSocketDisconnect
+diff --git a/fastapi/sse.py b/fastapi/sse.py
+new file mode 100644
+index 00000000..d4af311f
+--- /dev/null
++++ b/fastapi/sse.py
+@@ -0,0 +1,82 @@
++import json
++from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
++from dataclasses import dataclass
++from typing import Any
++
++import anyio
++from starlette.responses import StreamingResponse
++
++from .encoders import jsonable_encoder
++
++
++@dataclass
++class ServerSentEvent:
++    """A single Server-Sent Event to be sent to the client."""
++
++    data: Any = None
++    event: str | None = None
++    id: str | None = None
++    retry: int | None = None
++    comment: str | None = None
++
++    def format(self) -> bytes:
++        lines: list[str] = []
++        if self.comment is not None:
++            for line in self.comment.splitlines() or [""]:
++                lines.append(f": {line}")
++        if self.event is not None:
++            lines.append(f"event: {self.event}")
++        if self.data is not None:
++            if isinstance(self.data, str):
++                payload = self.data
++            else:
++                payload = json.dumps(jsonable_encoder(self.data))
++            for line in payload.splitlines() or [""]:
++                lines.append(f"data: {line}")
++        if self.id is not None:
++            lines.append(f"id: {self.id}")
++        if self.retry is not None:
++            lines.append(f"retry: {self.retry}")
++        return ("\n".join(lines) + "\n\n").encode("utf-8")
++
++
++def _format_item(item: Any) -> bytes:
++    if isinstance(item, ServerSentEvent):
++        return item.format()
++    return ServerSentEvent(data=item).format()
++
++
++class EventSourceResponse(StreamingResponse):
++    """Streaming response with media type `text/event-stream`.
++
++    Each yielded item is sent as an SSE event. Items that are not
++    `ServerSentEvent` instances are JSON-encoded and sent as `data`.
++    """
++
++    media_type = "text/event-stream"
++
++    def __init__(
++        self,
++        content: AsyncIterable[Any] | Iterable[Any],
++        *args: Any,
++        **kwargs: Any,
++    ) -> None:
++        kwargs.setdefault("media_type", self.media_type)
++        stream: AsyncIterator[bytes] | Iterator[bytes]
++        if isinstance(content, AsyncIterable):
++
++            async def _async_stream() -> AsyncIterator[bytes]:
++                async for item in content:
++                    yield _format_item(item)
++                    # To allow for cancellation to trigger
++                    await anyio.sleep(0)
++
++            stream = _async_stream()
++        else:
++
++            def _sync_stream() -> Iterator[bytes]:
++                for item in content:
++                    yield _format_item(item)
++
++            stream = _sync_stream()
++        super().__init__(stream, *args, **kwargs)

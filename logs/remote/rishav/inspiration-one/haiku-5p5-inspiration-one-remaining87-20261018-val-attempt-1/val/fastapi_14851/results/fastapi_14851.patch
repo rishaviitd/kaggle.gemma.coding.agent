@@ -1,0 +1,91 @@
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 9ca2f467..c8006bfe 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -160,6 +160,27 @@ def _merge_lifespan_context(
+     return merged_lifespan  # type: ignore[return-value]
+ 
+ 
++class _DefaultLifespan:
++    """
++    Lifespan that runs the router's `on_startup` and `on_shutdown` handlers.
++
++    Stopgap replacement for Starlette's default lifespan, which relied on the
++    `on_startup`/`on_shutdown` handling that is removed in newer Starlette versions.
++    """
++
++    def __init__(self, router: "APIRouter"):
++        self._router = router
++
++    async def __aenter__(self) -> None:
++        await self._router._run_startup_handlers()
++
++    async def __aexit__(self, *exc_info: object) -> None:
++        await self._router._run_shutdown_handlers()
++
++    def __call__(self, app: object) -> "_DefaultLifespan":
++        return self
++
++
+ # Cache for endpoint context to avoid re-extracting on every request
+ _endpoint_context_cache: dict[int, EndpointContext] = {}
+ 
+@@ -907,9 +928,16 @@ class APIRouter(routing.Router):
+             routes=routes,
+             redirect_slashes=redirect_slashes,
+             default=default,
+-            on_startup=on_startup,
+-            on_shutdown=on_shutdown,
+-            lifespan=lifespan,
++            lifespan=None,
++        )
++        self.on_startup: list[Callable[[], Any]] = (
++            [] if on_startup is None else list(on_startup)
++        )
++        self.on_shutdown: list[Callable[[], Any]] = (
++            [] if on_shutdown is None else list(on_shutdown)
++        )
++        self.lifespan_context: Lifespan[Any] = (
++            lifespan if lifespan is not None else _DefaultLifespan(self)
+         )
+         if prefix:
+             assert prefix.startswith("/"), "A path prefix must start with '/'"
+@@ -1423,10 +1451,6 @@ class APIRouter(routing.Router):
+                 self.add_websocket_route(
+                     prefix + route.path, route.endpoint, name=route.name
+                 )
+-        for handler in router.on_startup:
+-            self.add_event_handler("startup", handler)
+-        for handler in router.on_shutdown:
+-            self.add_event_handler("shutdown", handler)
+         self.lifespan_context = _merge_lifespan_context(
+             self.lifespan_context,
+             router.lifespan_context,
+@@ -4473,6 +4497,27 @@ class APIRouter(routing.Router):
+             generate_unique_id_function=generate_unique_id_function,
+         )
+ 
++    async def _run_startup_handlers(self) -> None:
++        for handler in self.on_startup:
++            if is_async_callable(handler):
++                await handler()
++            else:
++                handler()
++
++    async def _run_shutdown_handlers(self) -> None:
++        for handler in self.on_shutdown:
++            if is_async_callable(handler):
++                await handler()
++            else:
++                handler()
++
++    def add_event_handler(self, event_type: str, func: Callable[[], Any]) -> None:
++        assert event_type in ("startup", "shutdown")
++        if event_type == "startup":
++            self.on_startup.append(func)
++        else:
++            self.on_shutdown.append(func)
++
+     @deprecated(
+         """
+         on_event is deprecated, use lifespan event handlers instead.

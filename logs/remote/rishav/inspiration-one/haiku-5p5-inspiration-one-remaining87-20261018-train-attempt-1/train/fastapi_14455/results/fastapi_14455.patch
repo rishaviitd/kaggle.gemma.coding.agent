@@ -1,0 +1,86 @@
+diff --git a/fastapi/openapi/utils.py b/fastapi/openapi/utils.py
+index dbc93d28..6cda21b3 100644
+--- a/fastapi/openapi/utils.py
++++ b/fastapi/openapi/utils.py
+@@ -75,10 +75,44 @@ status_code_ranges: Dict[str, str] = {
+ }
+ 
+ 
++def _merge_security_definition(
++    existing: Dict[str, Any], new: Dict[str, Any]
++) -> Dict[str, Any]:
++    # The same security scheme name can be declared with different OAuth2 scopes
++    # (e.g. by different path operations). Merge their scopes into one definition
++    # instead of letting the last one overwrite the others.
++    existing_flows = existing.get("flows")
++    new_flows = new.get("flows")
++    if not isinstance(existing_flows, dict) or not isinstance(new_flows, dict):
++        return new
++    for flow_name, new_flow in new_flows.items():
++        existing_flow = existing_flows.get(flow_name)
++        if not isinstance(existing_flow, dict) or not isinstance(new_flow, dict):
++            existing_flows[flow_name] = new_flow
++            continue
++        existing_scopes = existing_flow.setdefault("scopes", {})
++        for scope, description in new_flow.get("scopes", {}).items():
++            existing_scopes.setdefault(scope, description)
++    return existing
++
++
++def _update_security_schemes(
++    components: Dict[str, Any], security_schemes: Dict[str, Any]
++) -> None:
++    existing_schemes = components.setdefault("securitySchemes", {})
++    for name, definition in security_schemes.items():
++        if name in existing_schemes:
++            existing_schemes[name] = _merge_security_definition(
++                existing_schemes[name], definition
++            )
++        else:
++            existing_schemes[name] = definition
++
++
+ def get_openapi_security_definitions(
+     flat_dependant: Dependant,
+ ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+-    security_definitions = {}
++    security_definitions: Dict[str, Any] = {}
+     operation_security = []
+     for security_requirement in flat_dependant.security_requirements:
+         security_definition = jsonable_encoder(
+@@ -87,7 +121,12 @@ def get_openapi_security_definitions(
+             exclude_none=True,
+         )
+         security_name = security_requirement.security_scheme.scheme_name
+-        security_definitions[security_name] = security_definition
++        if security_name in security_definitions:
++            security_definitions[security_name] = _merge_security_definition(
++                security_definitions[security_name], security_definition
++            )
++        else:
++            security_definitions[security_name] = security_definition
+         operation_security.append({security_name: security_requirement.scopes})
+     return security_definitions, operation_security
+ 
+@@ -520,9 +559,7 @@ def get_openapi(
+                 if path:
+                     paths.setdefault(route.path_format, {}).update(path)
+                 if security_schemes:
+-                    components.setdefault("securitySchemes", {}).update(
+-                        security_schemes
+-                    )
++                    _update_security_schemes(components, security_schemes)
+                 if path_definitions:
+                     definitions.update(path_definitions)
+     for webhook in webhooks or []:
+@@ -539,9 +576,7 @@ def get_openapi(
+                 if path:
+                     webhook_paths.setdefault(webhook.path_format, {}).update(path)
+                 if security_schemes:
+-                    components.setdefault("securitySchemes", {}).update(
+-                        security_schemes
+-                    )
++                    _update_security_schemes(components, security_schemes)
+                 if path_definitions:
+                     definitions.update(path_definitions)
+     if definitions:

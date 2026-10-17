@@ -1,0 +1,173 @@
+diff --git a/fastapi/applications.py b/fastapi/applications.py
+index b3424efc..780d7e4a 100644
+--- a/fastapi/applications.py
++++ b/fastapi/applications.py
+@@ -22,6 +22,7 @@ from fastapi.exception_handlers import (
+ )
+ from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
+ from fastapi.logger import logger
++from fastapi.middleware.asyncexitstack import AsyncExitStackMiddleware
+ from fastapi.openapi.docs import (
+     get_redoc_html,
+     get_swagger_ui_html,
+@@ -1081,6 +1082,9 @@ class FastAPI(Starlette):
+             scope["root_path"] = self.root_path
+         await super().__call__(scope, receive, send)
+ 
++    def build_middleware_stack(self) -> ASGIApp:
++        return AsyncExitStackMiddleware(super().build_middleware_stack())
++
+     def add_api_route(
+         self,
+         path: str,
+diff --git a/fastapi/middleware/asyncexitstack.py b/fastapi/middleware/asyncexitstack.py
+new file mode 100644
+index 00000000..808da413
+--- /dev/null
++++ b/fastapi/middleware/asyncexitstack.py
+@@ -0,0 +1,14 @@
++from contextlib import AsyncExitStack
++
++from starlette.types import ASGIApp, Receive, Scope, Send
++
++
++class AsyncExitStackMiddleware:
++    def __init__(self, app: ASGIApp, context_name: str = "fastapi_astack") -> None:
++        self.app = app
++        self.context_name = context_name
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        async with AsyncExitStack() as stack:
++            scope[self.context_name] = stack
++            await self.app(scope, receive, send)
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index f620ced5..84c41172 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -294,58 +294,62 @@ def get_request_handler(
+                 )
+                 raise http_error from e
+             errors: List[Any] = []
+-            async with AsyncExitStack() as async_exit_stack:
+-                solved_result = await solve_dependencies(
+-                    request=request,
++            async_exit_stack = request.scope.get("fastapi_astack")
++            if async_exit_stack is None:
++                async_exit_stack = await file_stack.enter_async_context(
++                    AsyncExitStack()
++                )
++            solved_result = await solve_dependencies(
++                request=request,
++                dependant=dependant,
++                body=body,
++                dependency_overrides_provider=dependency_overrides_provider,
++                async_exit_stack=async_exit_stack,
++                embed_body_fields=embed_body_fields,
++            )
++            errors = solved_result.errors
++            if not errors:
++                raw_response = await run_endpoint_function(
+                     dependant=dependant,
+-                    body=body,
+-                    dependency_overrides_provider=dependency_overrides_provider,
+-                    async_exit_stack=async_exit_stack,
+-                    embed_body_fields=embed_body_fields,
++                    values=solved_result.values,
++                    is_coroutine=is_coroutine,
+                 )
+-                errors = solved_result.errors
+-                if not errors:
+-                    raw_response = await run_endpoint_function(
+-                        dependant=dependant,
+-                        values=solved_result.values,
+-                        is_coroutine=is_coroutine,
++                if isinstance(raw_response, Response):
++                    if raw_response.background is None:
++                        raw_response.background = solved_result.background_tasks
++                    response = raw_response
++                else:
++                    response_args: Dict[str, Any] = {
++                        "background": solved_result.background_tasks
++                    }
++                    # If status_code was set, use it, otherwise use the default from the
++                    # response class, in the case of redirect it's 307
++                    current_status_code = (
++                        status_code
++                        if status_code
++                        else solved_result.response.status_code
+                     )
+-                    if isinstance(raw_response, Response):
+-                        if raw_response.background is None:
+-                            raw_response.background = solved_result.background_tasks
+-                        response = raw_response
+-                    else:
+-                        response_args: Dict[str, Any] = {
+-                            "background": solved_result.background_tasks
+-                        }
+-                        # If status_code was set, use it, otherwise use the default from the
+-                        # response class, in the case of redirect it's 307
+-                        current_status_code = (
+-                            status_code
+-                            if status_code
+-                            else solved_result.response.status_code
++                    if current_status_code is not None:
++                        response_args["status_code"] = current_status_code
++                    if solved_result.response.status_code:
++                        response_args["status_code"] = (
++                            solved_result.response.status_code
+                         )
+-                        if current_status_code is not None:
+-                            response_args["status_code"] = current_status_code
+-                        if solved_result.response.status_code:
+-                            response_args["status_code"] = (
+-                                solved_result.response.status_code
+-                            )
+-                        content = await serialize_response(
+-                            field=response_field,
+-                            response_content=raw_response,
+-                            include=response_model_include,
+-                            exclude=response_model_exclude,
+-                            by_alias=response_model_by_alias,
+-                            exclude_unset=response_model_exclude_unset,
+-                            exclude_defaults=response_model_exclude_defaults,
+-                            exclude_none=response_model_exclude_none,
+-                            is_coroutine=is_coroutine,
+-                        )
+-                        response = actual_response_class(content, **response_args)
+-                        if not is_body_allowed_for_status_code(response.status_code):
+-                            response.body = b""
+-                        response.headers.raw.extend(solved_result.response.headers.raw)
++                    content = await serialize_response(
++                        field=response_field,
++                        response_content=raw_response,
++                        include=response_model_include,
++                        exclude=response_model_exclude,
++                        by_alias=response_model_by_alias,
++                        exclude_unset=response_model_exclude_unset,
++                        exclude_defaults=response_model_exclude_defaults,
++                        exclude_none=response_model_exclude_none,
++                        is_coroutine=is_coroutine,
++                    )
++                    response = actual_response_class(content, **response_args)
++                    if not is_body_allowed_for_status_code(response.status_code):
++                        response.body = b""
++                    response.headers.raw.extend(solved_result.response.headers.raw)
+             if errors:
+                 validation_error = RequestValidationError(
+                     _normalize_errors(errors), body=body
+@@ -370,11 +374,10 @@ def get_websocket_app(
+     embed_body_fields: bool = False,
+ ) -> Callable[[WebSocket], Coroutine[Any, Any, Any]]:
+     async def app(websocket: WebSocket) -> None:
+-        async with AsyncExitStack() as async_exit_stack:
+-            # TODO: remove this scope later, after a few releases
+-            # This scope fastapi_astack is no longer used by FastAPI, kept for
+-            # compatibility, just in case
+-            websocket.scope["fastapi_astack"] = async_exit_stack
++        async_exit_stack = websocket.scope.get("fastapi_astack")
++        if async_exit_stack is None:
++            async_exit_stack = AsyncExitStack()
++        async with async_exit_stack:
+             solved_result = await solve_dependencies(
+                 request=websocket,
+                 dependant=dependant,

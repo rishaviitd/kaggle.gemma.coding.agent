@@ -1,0 +1,112 @@
+diff --git a/fastapi/__init__.py b/fastapi/__init__.py
+index aac0176b..1b27c5dd 100644
+--- a/fastapi/__init__.py
++++ b/fastapi/__init__.py
+@@ -21,5 +21,7 @@ from .param_functions import Security as Security
+ from .requests import Request as Request
+ from .responses import Response as Response
+ from .routing import APIRouter as APIRouter
++from .sse import EventSourceResponse as EventSourceResponse
++from .sse import ServerSentEvent as ServerSentEvent
+ from .websockets import WebSocket as WebSocket
+ from .websockets import WebSocketDisconnect as WebSocketDisconnect
+diff --git a/fastapi/sse.py b/fastapi/sse.py
+new file mode 100644
+index 00000000..b9a3886d
+--- /dev/null
++++ b/fastapi/sse.py
+@@ -0,0 +1,94 @@
++import json
++from collections.abc import AsyncIterable, Iterable, Mapping
++from dataclasses import dataclass
++from typing import Any
++
++from fastapi.encoders import jsonable_encoder
++from starlette.background import BackgroundTask
++from starlette.responses import StreamingResponse
++
++
++@dataclass
++class ServerSentEvent:
++    """
++    A single Server-Sent Event to be sent to the client.
++
++    Yield instances of this class from an endpoint that uses `EventSourceResponse`
++    to control the event fields. Any other yielded value is sent as the `data`
++    field, JSON-encoded.
++    """
++
++    data: Any = None
++    raw_data: str | None = None
++    event: str | None = None
++    id: str | None = None
++    retry: int | None = None
++    comment: str | None = None
++
++    def format(self) -> bytes:
++        lines: list[str] = []
++        if self.comment is not None:
++            for line in self.comment.splitlines() or [""]:
++                lines.append(f": {line}")
++        if self.event is not None:
++            lines.append(f"event: {self.event}")
++        if self.id is not None:
++            lines.append(f"id: {self.id}")
++        if self.retry is not None:
++            lines.append(f"retry: {self.retry}")
++        if self.raw_data is not None:
++            payload = self.raw_data
++        elif self.data is not None:
++            payload = json.dumps(jsonable_encoder(self.data))
++        else:
++            payload = None
++        if payload is not None:
++            for line in payload.splitlines() or [""]:
++                lines.append(f"data: {line}")
++        return ("\n".join(lines) + "\n\n").encode("utf-8")
++
++
++def _encode_event(item: Any) -> bytes:
++    if isinstance(item, ServerSentEvent):
++        return item.format()
++    return ServerSentEvent(data=item).format()
++
++
++class EventSourceResponse(StreamingResponse):
++    """
++    Streaming response for Server-Sent Events (`text/event-stream`).
++
++    Use it as `response_class` of a path operation whose endpoint is a generator.
++    """
++
++    media_type = "text/event-stream"
++
++    def __init__(
++        self,
++        content: AsyncIterable[Any] | Iterable[Any],
++        status_code: int = 200,
++        headers: Mapping[str, str] | None = None,
++        background: BackgroundTask | None = None,
++    ) -> None:
++        if isinstance(content, AsyncIterable):
++
++            async def _async_events() -> AsyncIterable[bytes]:
++                async for item in content:
++                    yield _encode_event(item)
++
++            encoded: Any = _async_events()
++        else:
++
++            def _sync_events() -> Iterable[bytes]:
++                for item in content:
++                    yield _encode_event(item)
++
++            encoded = _sync_events()
++        super().__init__(
++            encoded,
++            status_code=status_code,
++            headers=headers,
++            media_type=self.media_type,
++            background=background,
++        )
++        self.headers.setdefault("Cache-Control", "no-cache")

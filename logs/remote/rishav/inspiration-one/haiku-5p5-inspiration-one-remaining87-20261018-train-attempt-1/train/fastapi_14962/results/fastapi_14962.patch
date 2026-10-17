@@ -1,0 +1,93 @@
+diff --git a/fastapi/_compat/v2.py b/fastapi/_compat/v2.py
+index 0535c806..2e82fac0 100644
+--- a/fastapi/_compat/v2.py
++++ b/fastapi/_compat/v2.py
+@@ -174,6 +174,29 @@ class ModelField:
+                 errors=exc.errors(include_url=False), loc_prefix=loc
+             )
+ 
++    def serialize_json(
++        self,
++        value: Any,
++        *,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
++        by_alias: bool = True,
++        exclude_unset: bool = False,
++        exclude_defaults: bool = False,
++        exclude_none: bool = False,
++    ) -> bytes:
++        # What calls this code passes a value that already called
++        # self._type_adapter.validate_python(value)
++        return self._type_adapter.dump_json(
++            value,
++            include=include,
++            exclude=exclude,
++            by_alias=by_alias,
++            exclude_unset=exclude_unset,
++            exclude_defaults=exclude_defaults,
++            exclude_none=exclude_none,
++        )
++
+     def serialize(
+         self,
+         value: Any,
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index ea82ab14..54720f46 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -271,6 +271,7 @@ async def serialize_response(
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
+     endpoint_ctx: EndpointContext | None = None,
++    dump_json: bool = False,
+ ) -> Any:
+     if field:
+         if is_coroutine:
+@@ -287,6 +288,16 @@ async def serialize_response(
+                 endpoint_ctx=ctx,
+             )
+ 
++        if dump_json:
++            return field.serialize_json(
++                value,
++                include=include,
++                exclude=exclude,
++                by_alias=by_alias,
++                exclude_unset=exclude_unset,
++                exclude_defaults=exclude_defaults,
++                exclude_none=exclude_none,
++            )
+         return field.serialize(
+             value,
+             include=include,
+@@ -443,6 +454,13 @@ def get_request_handler(
+                     response_args["status_code"] = current_status_code
+                 if solved_result.response.status_code:
+                     response_args["status_code"] = solved_result.response.status_code
++                # Use Pydantic's JSON serializer directly when the response is a
++                # plain JSONResponse (no custom render) and there is a response model
++                use_dump_json = (
++                    response_field is not None
++                    and issubclass(actual_response_class, JSONResponse)
++                    and actual_response_class.render is JSONResponse.render
++                )
+                 content = await serialize_response(
+                     field=response_field,
+                     response_content=raw_response,
+@@ -454,8 +472,14 @@ def get_request_handler(
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
+                     endpoint_ctx=endpoint_ctx,
++                    dump_json=use_dump_json,
+                 )
+-                response = actual_response_class(content, **response_args)
++                if use_dump_json:
++                    response = actual_response_class(None, **response_args)
++                    response.body = content
++                    response.headers["content-length"] = str(len(content))
++                else:
++                    response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+                     response.body = b""
+                 response.headers.raw.extend(solved_result.response.headers.raw)

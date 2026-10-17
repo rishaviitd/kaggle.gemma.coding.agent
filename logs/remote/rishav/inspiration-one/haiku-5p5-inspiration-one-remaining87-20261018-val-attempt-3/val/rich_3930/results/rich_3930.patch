@@ -1,0 +1,98 @@
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..cf62ea90 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -1,10 +1,64 @@
+ from __future__ import annotations
+ 
++import unicodedata
+ from functools import lru_cache
+-from typing import Callable
++from typing import Callable, List
+ 
+ from ._cell_widths import CELL_WIDTHS
+ 
++_ZWJ = 0x200D
++_VARIATION_SELECTOR_16 = 0xFE0F
++
++
++def _is_grapheme_extend(character: str) -> bool:
++    """Check if a character extends the preceding grapheme cluster."""
++    codepoint = ord(character)
++    if codepoint == _ZWJ or 0xFE00 <= codepoint <= 0xFE0F:
++        return True
++    if 0x1F3FB <= codepoint <= 0x1F3FF:  # Emoji skin tone modifiers
++        return True
++    return unicodedata.category(character) in ("Mn", "Me", "Mc")
++
++
++def _is_regional_indicator(character: str) -> bool:
++    return 0x1F1E6 <= ord(character) <= 0x1F1FF
++
++
++def split_graphemes(text: str) -> List[str]:
++    """Split text in to a list of grapheme clusters (sequences that render as a single glyph).
++
++    Args:
++        text (str): Text to split.
++
++    Returns:
++        List[str]: A list of grapheme clusters.
++    """
++    graphemes: List[str] = []
++    append = graphemes.append
++    previous_is_zwj = False
++    regional_pending = False
++    for character in text:
++        if not graphemes:
++            append(character)
++            previous_is_zwj = character == "\u200d"
++            regional_pending = _is_regional_indicator(character)
++            continue
++        if _is_grapheme_extend(character) or (
++            previous_is_zwj and ord(character) >= 0x2000
++        ):
++            graphemes[-1] += character
++            previous_is_zwj = character == "\u200d"
++            regional_pending = False
++        elif _is_regional_indicator(character) and regional_pending:
++            graphemes[-1] += character
++            regional_pending = False
++            previous_is_zwj = False
++        else:
++            append(character)
++            previous_is_zwj = character == "\u200d"
++            regional_pending = _is_regional_indicator(character)
++    return graphemes
++
+ # Ranges of unicode ordinals that produce a 1-cell wide character
+ # This is non-exhaustive, but covers most common Western characters
+ _SINGLE_CELL_UNICODE_RANGES: list[tuple[int, int]] = [
+@@ -45,7 +99,17 @@ def cached_cell_len(text: str) -> int:
+     """
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return sum(map(_get_grapheme_cell_size, split_graphemes(text)))
++
++
++def _get_grapheme_cell_size(grapheme: str) -> int:
++    """Get the cell size of a grapheme cluster (a sequence that renders as one glyph)."""
++    if len(grapheme) == 1:
++        return get_character_cell_size(grapheme)
++    width = get_character_cell_size(grapheme[0])
++    if width == 1 and _VARIATION_SELECTOR_16 in map(ord, grapheme):
++        return 2
++    return width
+ 
+ 
+ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> int:
+@@ -61,7 +125,7 @@ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> in
+         return _cell_len(text)
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return sum(map(_get_grapheme_cell_size, split_graphemes(text)))
+ 
+ 
+ @lru_cache(maxsize=4096)

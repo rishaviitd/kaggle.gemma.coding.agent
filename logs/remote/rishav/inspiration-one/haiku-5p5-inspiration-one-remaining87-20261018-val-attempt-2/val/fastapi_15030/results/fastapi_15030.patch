@@ -1,0 +1,100 @@
+diff --git a/fastapi/sse.py b/fastapi/sse.py
+new file mode 100644
+index 00000000..160f4260
+--- /dev/null
++++ b/fastapi/sse.py
+@@ -0,0 +1,94 @@
++import json
++from dataclasses import dataclass
++from typing import Any, AsyncIterable, Iterable, Optional, Union
++
++from fastapi.encoders import jsonable_encoder
++from starlette.responses import StreamingResponse
++
++
++@dataclass
++class ServerSentEvent:
++    """A single Server-Sent Event to be sent to the client.
++
++    `data` is serialized to JSON (using `jsonable_encoder`), unless `raw_data`
++    is provided, in which case it is sent as is.
++    """
++
++    data: Any = None
++    raw_data: Optional[str] = None
++    event: Optional[str] = None
++    id: Optional[str] = None
++    retry: Optional[int] = None
++    comment: Optional[str] = None
++
++    def __post_init__(self) -> None:
++        if self.data is not None and self.raw_data is not None:
++            raise ValueError("Only one of 'data' or 'raw_data' can be provided")
++
++    def format(self) -> bytes:
++        lines = []
++        if self.comment is not None:
++            for line in self.comment.splitlines() or [""]:
++                lines.append(f": {line}")
++        if self.event is not None:
++            lines.append(f"event: {self.event}")
++        if self.id is not None:
++            lines.append(f"id: {self.id}")
++        if self.retry is not None:
++            lines.append(f"retry: {self.retry}")
++        if self.raw_data is not None:
++            payload = self.raw_data
++        elif self.data is not None:
++            payload = json.dumps(jsonable_encoder(self.data), separators=(",", ":"))
++        else:
++            payload = None
++        if payload is not None:
++            for line in payload.splitlines() or [""]:
++                lines.append(f"data: {line}")
++        return ("\n".join(lines) + "\n\n").encode("utf-8")
++
++
++def _encode_item(item: Any) -> bytes:
++    if isinstance(item, ServerSentEvent):
++        return item.format()
++    return ServerSentEvent(data=item).format()
++
++
++class EventSourceResponse(StreamingResponse):
++    """Streaming response with `text/event-stream` media type.
++
++    Each yielded item is sent as a Server-Sent Event. Items that are not
++    `ServerSentEvent` instances are sent as the `data` of an event.
++    """
++
++    media_type = "text/event-stream"
++
++    def __init__(
++        self,
++        content: Union[Iterable[Any], AsyncIterable[Any]],
++        *,
++        status_code: int = 200,
++        headers: Optional[dict] = None,
++        background: Any = None,
++    ) -> None:
++        if hasattr(content, "__aiter__"):
++
++            async def _aencode() -> AsyncIterable[bytes]:
++                async for item in content:  # type: ignore[union-attr]
++                    yield _encode_item(item)
++
++            encoded: Any = _aencode()
++        else:
++
++            def _encode() -> Iterable[bytes]:
++                for item in content:  # type: ignore[union-attr]
++                    yield _encode_item(item)
++
++            encoded = _encode()
++        super().__init__(
++            encoded,
++            status_code=status_code,
++            headers=headers,
++            media_type=self.media_type,
++            background=background,
++        )

@@ -1,0 +1,205 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index 418c1172..f87ce1d3 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -1,5 +1,5 @@
+ from dataclasses import dataclass, field
+-from typing import Any, Callable, List, Optional, Sequence, Tuple
++from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, Union
+ 
+ from fastapi._compat import ModelField
+ from fastapi.security.base import SecurityBase
+@@ -31,6 +31,7 @@ class Dependant:
+     security_scopes: Optional[List[str]] = None
+     use_cache: bool = True
+     path: Optional[str] = None
++    scope: Union[Literal["function", "request"], None] = None
+     cache_key: Tuple[Optional[Callable[..., Any]], Tuple[str, ...]] = field(init=False)
+ 
+     def __post_init__(self) -> None:
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 6477a2cb..70a96e02 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -237,6 +237,7 @@ def get_dependant(
+     name: Optional[str] = None,
+     security_scopes: Optional[List[str]] = None,
+     use_cache: bool = True,
++    scope: Optional[str] = None,
+ ) -> Dependant:
+     dependant = Dependant(
+         call=call,
+@@ -244,6 +245,7 @@ def get_dependant(
+         path=path,
+         security_scopes=security_scopes,
+         use_cache=use_cache,
++        scope=scope,  # type: ignore[arg-type]
+     )
+     path_param_names = get_path_param_names(path)
+     endpoint_signature = get_typed_signature(call)
+@@ -276,6 +278,7 @@ def get_dependant(
+                 name=param_name,
+                 security_scopes=use_security_scopes,
+                 use_cache=param_details.depends.use_cache,
++                scope=param_details.depends.scope,
+             )
+             dependant.dependencies.append(sub_dependant)
+             continue
+@@ -585,6 +588,7 @@ async def solve_dependencies(
+     dependency_cache: Optional[Dict[Tuple[Callable[..., Any], Tuple[str]], Any]] = None,
+     async_exit_stack: AsyncExitStack,
+     embed_body_fields: bool,
++    function_astack: Optional[AsyncExitStack] = None,
+ ) -> SolvedDependency:
+     values: Dict[str, Any] = {}
+     errors: List[Any] = []
+@@ -616,6 +620,7 @@ async def solve_dependencies(
+                 call=call,
+                 name=sub_dependant.name,
+                 security_scopes=sub_dependant.security_scopes,
++                scope=sub_dependant.scope,
+             )
+ 
+         solved_result = await solve_dependencies(
+@@ -628,6 +633,7 @@ async def solve_dependencies(
+             dependency_cache=dependency_cache,
+             async_exit_stack=async_exit_stack,
+             embed_body_fields=embed_body_fields,
++            function_astack=function_astack,
+         )
+         background_tasks = solved_result.background_tasks
+         if solved_result.errors:
+@@ -636,8 +642,11 @@ async def solve_dependencies(
+         if sub_dependant.use_cache and sub_dependant.cache_key in dependency_cache:
+             solved = dependency_cache[sub_dependant.cache_key]
+         elif is_gen_callable(call) or is_async_gen_callable(call):
++            stack = async_exit_stack
++            if sub_dependant.scope == "function" and function_astack is not None:
++                stack = function_astack
+             solved = await solve_generator(
+-                call=call, stack=async_exit_stack, sub_values=solved_result.values
++                call=call, stack=stack, sub_values=solved_result.values
+             )
+         elif is_coroutine_callable(call):
+             solved = await call(**solved_result.values)
+diff --git a/fastapi/param_functions.py b/fastapi/param_functions.py
+index f88937e2..aba66118 100644
+--- a/fastapi/param_functions.py
++++ b/fastapi/param_functions.py
+@@ -1,4 +1,4 @@
+-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
++from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+ 
+ from annotated_doc import Doc
+ from fastapi import params
+@@ -2232,19 +2232,31 @@ def Depends(  # noqa: N802
+     ] = None,
+     *,
+     use_cache: Annotated[
+-        bool,
++            bool,
+         Doc(
+             """
+-            By default, after a dependency is called the first time in a request, if
+-            the dependency is declared again for the rest of the request (for example
+-            if the dependency is needed by several dependencies), the value will be
+-            re-used for the rest of the request.
++            By default, after a dependency is called the first time in a request, if the dependency is declared again for the rest of the request (for example if the dependency is needed by several dependencies), the value will be re-used for the rest of the request.
+ 
+-            Set `use_cache` to `False` to disable this behavior and ensure the
+-            dependency is called again (if declared more than once) in the same request.
++            Set `use_cache` to `False` to disable this behavior and ensure the dependency is called again (if declared more than once) in the same request.
+             """
+         ),
+     ] = True,
++scope: Annotated[
++        Union[Literal["function", "request"], None],
++        Doc(
++            """
++            Mainly for dependencies with `yield`, define when the dependency function
++            should start (the code before `yield`) and when it should end (the code
++            after `yield`).
++
++            * `"request"` (default): the dependency starts before the path operation
++              function is called and ends after the response is sent.
++            * `"function"`: the dependency starts before the path operation function
++              is called and ends right after the path operation function returns,
++              before the response is sent.
++            """
++            ),
++        ] = None,
+ ) -> Any:
+     """
+     Declare a FastAPI dependency.
+@@ -2275,7 +2287,7 @@ def Depends(  # noqa: N802
+         return commons
+     ```
+     """
+-    return params.Depends(dependency=dependency, use_cache=use_cache)
++    return params.Depends(dependency=dependency, use_cache=use_cache, scope=scope)
+ 
+ 
+ def Security(  # noqa: N802
+diff --git a/fastapi/params.py b/fastapi/params.py
+index 2dc04be1..9df8c53b 100644
+--- a/fastapi/params.py
++++ b/fastapi/params.py
+@@ -1,7 +1,7 @@
+ import warnings
+ from dataclasses import dataclass
+ from enum import Enum
+-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
++from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+ 
+ from fastapi.openapi.models import Example
+ from pydantic.fields import FieldInfo
+@@ -766,6 +766,7 @@ class File(Form):  # type: ignore[misc]
+ class Depends:
+     dependency: Optional[Callable[..., Any]] = None
+     use_cache: bool = True
++    scope: Union[Literal["function", "request"], None] = None
+ 
+ 
+ @dataclass
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 0b59d250..b3ef4327 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -377,21 +377,24 @@ def get_request_handler(
+         assert isinstance(async_exit_stack, AsyncExitStack), (
+             "fastapi_inner_astack not found in request scope"
+         )
+-        solved_result = await solve_dependencies(
+-            request=request,
+-            dependant=dependant,
+-            body=body,
+-            dependency_overrides_provider=dependency_overrides_provider,
+-            async_exit_stack=async_exit_stack,
+-            embed_body_fields=embed_body_fields,
+-        )
+-        errors = solved_result.errors
+-        if not errors:
+-            raw_response = await run_endpoint_function(
++        async with AsyncExitStack() as function_stack:
++            solved_result = await solve_dependencies(
++                request=request,
+                 dependant=dependant,
+-                values=solved_result.values,
+-                is_coroutine=is_coroutine,
++                body=body,
++                dependency_overrides_provider=dependency_overrides_provider,
++                async_exit_stack=async_exit_stack,
++                embed_body_fields=embed_body_fields,
++                function_astack=function_stack,
+             )
++            errors = solved_result.errors
++            if not errors:
++                raw_response = await run_endpoint_function(
++                    dependant=dependant,
++                    values=solved_result.values,
++                    is_coroutine=is_coroutine,
++                )
++        if not errors:
+             if isinstance(raw_response, Response):
+                 if raw_response.background is None:
+                     raw_response.background = solved_result.background_tasks
