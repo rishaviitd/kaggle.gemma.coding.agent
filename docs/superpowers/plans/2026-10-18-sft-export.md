@@ -11,7 +11,7 @@
 ## Tasks
 
 - [x] Write failing reconstruction tests: preserve prompts/tools once, match call IDs, split commentary before actions, reject changed context, unsupported blocks, missing results and incomplete responses.
-- [x] Implement `scripts/export_sft.py` normalization and strict validation for `anthropic_exchanges.json`.
+- [x] Implement `scripts/sft_export/export_sft.py` normalization and strict validation for `anthropic_exchanges.json`.
 - [x] Write failing formatting tests using the actual official tokenizer: exact upstream text equivalence, tool-result/prompt masking, tool stop tokens, optional reasoning, excluded turns, and no truncation.
 - [x] Implement annotated rendering with fail-closed template compatibility, token-level masks, and a recursive CLI with atomic outputs and provenance.
 - [x] Document CLI commands, direct training consumption of labels, source links and trace-quality caveats. Run the repository tests and export the supplied FastAPI task.

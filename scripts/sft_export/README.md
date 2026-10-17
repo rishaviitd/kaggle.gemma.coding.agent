@@ -1,5 +1,6 @@
 # Export coding-agent traces for Gemma 4 SFT
 
+This folder contains the exporter, its tests, and this usage guide.
 `export_sft.py` accepts one task folder, an ancestor containing task folders, or an
 `anthropic_exchanges.json` file. It exports **one conversation per task segment**.
 It currently supports raw Anthropic exchanges, including the supplied Haiku run.
@@ -13,7 +14,7 @@ It reads data only; it never executes captured tool commands.
 From the repository root, using the existing `.venv`:
 
 ```bash
-.venv/bin/python scripts/export_sft.py \
+.venv/bin/python scripts/sft_export/export_sft.py \
   logs/remote/rishav/inspiration-one/haiku-5p5-inspiration-one-20-20261017/val/fastapi_5624 \
   --output data/transient/sft-fastapi-5624 \
   --retain-reasoning --enable-thinking
@@ -191,7 +192,7 @@ held out.
 
 ```bash
 GEMMA_SFT_TOKENIZER=/path/to/downloaded/tokenizer \
-  .venv/bin/python -m unittest discover -s scripts/tests -v
+  .venv/bin/python -m unittest discover -s scripts/sft_export/tests -v
 ```
 
 Without `GEMMA_SFT_TOKENIZER`, normalization tests run and real-tokenizer tests are
