@@ -1,0 +1,319 @@
+diff --git a/fastapi/applications.py b/fastapi/applications.py
+index b3424efc..128d9ef1 100644
+--- a/fastapi/applications.py
++++ b/fastapi/applications.py
+@@ -22,6 +22,7 @@ from fastapi.exception_handlers import (
+ )
+ from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
+ from fastapi.logger import logger
++from fastapi.middleware.asyncexitstack import AsyncExitStackMiddleware
+ from fastapi.openapi.docs import (
+     get_redoc_html,
+     get_swagger_ui_html,
+@@ -989,6 +990,9 @@ class FastAPI(Starlette):
+         )
+         self.middleware_stack: Union[ASGIApp, None] = None
+         self.setup()
++        # Innermost FastAPI middleware: closes dependencies with yield and
++        # UploadFiles only after the response is done (e.g. streaming responses)
++        self.user_middleware.append(Middleware(AsyncExitStackMiddleware))
+ 
+     def openapi(self) -> Dict[str, Any]:
+         """
+diff --git a/fastapi/middleware/asyncexitstack.py b/fastapi/middleware/asyncexitstack.py
+new file mode 100644
+index 00000000..7d34aa9e
+--- /dev/null
++++ b/fastapi/middleware/asyncexitstack.py
+@@ -0,0 +1,25 @@
++from contextlib import AsyncExitStack
++from typing import Optional
++
++from starlette.types import ASGIApp, Receive, Scope, Send
++
++
++class AsyncExitStackMiddleware:
++    def __init__(self, app: ASGIApp, context_name: str = "fastapi_astack") -> None:
++        self.app = app
++        self.context_name = context_name
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        dependency_exception: Optional[Exception] = None
++        async with AsyncExitStack() as stack:
++            scope[self.context_name] = stack
++            try:
++                await self.app(scope, receive, send)
++            except Exception as e:
++                dependency_exception = e
++                raise e
++        if dependency_exception:
++            # This exception was possibly handled by the dependency but it should
++            # still bubble up so that the ServerErrorMiddleware can return a 500
++            # or the ExceptionMiddleware can catch and handle any other exceptions
++            raise dependency_exception
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index f620ced5..8346ae45 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -3,7 +3,7 @@ import email.message
+ import inspect
+ import json
+ import sys
+-from contextlib import AsyncExitStack, asynccontextmanager
++from contextlib import asynccontextmanager
+ from enum import Enum, IntEnum
+ from typing import (
+     Any,
+@@ -246,111 +246,111 @@ def get_request_handler(
+ 
+     async def app(request: Request) -> Response:
+         response: Union[Response, None] = None
+-        async with AsyncExitStack() as file_stack:
+-            try:
+-                body: Any = None
+-                if body_field:
+-                    if is_body_form:
+-                        body = await request.form()
+-                        file_stack.push_async_callback(body.close)
+-                    else:
+-                        body_bytes = await request.body()
+-                        if body_bytes:
+-                            json_body: Any = Undefined
+-                            content_type_value = request.headers.get("content-type")
+-                            if not content_type_value:
+-                                json_body = await request.json()
+-                            else:
+-                                message = email.message.Message()
+-                                message["content-type"] = content_type_value
+-                                if message.get_content_maintype() == "application":
+-                                    subtype = message.get_content_subtype()
+-                                    if subtype == "json" or subtype.endswith("+json"):
+-                                        json_body = await request.json()
+-                            if json_body != Undefined:
+-                                body = json_body
+-                            else:
+-                                body = body_bytes
+-            except json.JSONDecodeError as e:
+-                validation_error = RequestValidationError(
+-                    [
+-                        {
+-                            "type": "json_invalid",
+-                            "loc": ("body", e.pos),
+-                            "msg": "JSON decode error",
+-                            "input": {},
+-                            "ctx": {"error": e.msg},
+-                        }
+-                    ],
+-                    body=e.doc,
+-                )
+-                raise validation_error from e
+-            except HTTPException:
+-                # If a middleware raises an HTTPException, it should be raised again
+-                raise
+-            except Exception as e:
+-                http_error = HTTPException(
+-                    status_code=400, detail="There was an error parsing the body"
+-                )
+-                raise http_error from e
+-            errors: List[Any] = []
+-            async with AsyncExitStack() as async_exit_stack:
+-                solved_result = await solve_dependencies(
+-                    request=request,
+-                    dependant=dependant,
+-                    body=body,
+-                    dependency_overrides_provider=dependency_overrides_provider,
+-                    async_exit_stack=async_exit_stack,
+-                    embed_body_fields=embed_body_fields,
++        file_stack = request.scope["fastapi_astack"]
++        async_exit_stack = file_stack
++        try:
++            body: Any = None
++            if body_field:
++                if is_body_form:
++                    body = await request.form()
++                    file_stack.push_async_callback(body.close)
++                else:
++                    body_bytes = await request.body()
++                    if body_bytes:
++                        json_body: Any = Undefined
++                        content_type_value = request.headers.get("content-type")
++                        if not content_type_value:
++                            json_body = await request.json()
++                        else:
++                            message = email.message.Message()
++                            message["content-type"] = content_type_value
++                            if message.get_content_maintype() == "application":
++                                subtype = message.get_content_subtype()
++                                if subtype == "json" or subtype.endswith("+json"):
++                                    json_body = await request.json()
++                        if json_body != Undefined:
++                            body = json_body
++                        else:
++                            body = body_bytes
++        except json.JSONDecodeError as e:
++            validation_error = RequestValidationError(
++                [
++                    {
++                        "type": "json_invalid",
++                        "loc": ("body", e.pos),
++                        "msg": "JSON decode error",
++                        "input": {},
++                        "ctx": {"error": e.msg},
++                    }
++                ],
++                body=e.doc,
++            )
++            raise validation_error from e
++        except HTTPException:
++            # If a middleware raises an HTTPException, it should be raised again
++            raise
++        except Exception as e:
++            http_error = HTTPException(
++                status_code=400, detail="There was an error parsing the body"
++            )
++            raise http_error from e
++        errors: List[Any] = []
++        solved_result = await solve_dependencies(
++            request=request,
++            dependant=dependant,
++            body=body,
++            dependency_overrides_provider=dependency_overrides_provider,
++            async_exit_stack=async_exit_stack,
++            embed_body_fields=embed_body_fields,
++        )
++        errors = solved_result.errors
++        if not errors:
++            raw_response = await run_endpoint_function(
++                dependant=dependant,
++                values=solved_result.values,
++                is_coroutine=is_coroutine,
++            )
++            if isinstance(raw_response, Response):
++                if raw_response.background is None:
++                    raw_response.background = solved_result.background_tasks
++                response = raw_response
++            else:
++                response_args: Dict[str, Any] = {
++                    "background": solved_result.background_tasks
++                }
++                # If status_code was set, use it, otherwise use the default from the
++                # response class, in the case of redirect it's 307
++                current_status_code = (
++                    status_code
++                    if status_code
++                    else solved_result.response.status_code
+                 )
+-                errors = solved_result.errors
+-                if not errors:
+-                    raw_response = await run_endpoint_function(
+-                        dependant=dependant,
+-                        values=solved_result.values,
+-                        is_coroutine=is_coroutine,
++                if current_status_code is not None:
++                    response_args["status_code"] = current_status_code
++                if solved_result.response.status_code:
++                    response_args["status_code"] = (
++                        solved_result.response.status_code
+                     )
+-                    if isinstance(raw_response, Response):
+-                        if raw_response.background is None:
+-                            raw_response.background = solved_result.background_tasks
+-                        response = raw_response
+-                    else:
+-                        response_args: Dict[str, Any] = {
+-                            "background": solved_result.background_tasks
+-                        }
+-                        # If status_code was set, use it, otherwise use the default from the
+-                        # response class, in the case of redirect it's 307
+-                        current_status_code = (
+-                            status_code
+-                            if status_code
+-                            else solved_result.response.status_code
+-                        )
+-                        if current_status_code is not None:
+-                            response_args["status_code"] = current_status_code
+-                        if solved_result.response.status_code:
+-                            response_args["status_code"] = (
+-                                solved_result.response.status_code
+-                            )
+-                        content = await serialize_response(
+-                            field=response_field,
+-                            response_content=raw_response,
+-                            include=response_model_include,
+-                            exclude=response_model_exclude,
+-                            by_alias=response_model_by_alias,
+-                            exclude_unset=response_model_exclude_unset,
+-                            exclude_defaults=response_model_exclude_defaults,
+-                            exclude_none=response_model_exclude_none,
+-                            is_coroutine=is_coroutine,
+-                        )
+-                        response = actual_response_class(content, **response_args)
+-                        if not is_body_allowed_for_status_code(response.status_code):
+-                            response.body = b""
+-                        response.headers.raw.extend(solved_result.response.headers.raw)
+-            if errors:
+-                validation_error = RequestValidationError(
+-                    _normalize_errors(errors), body=body
++                content = await serialize_response(
++                    field=response_field,
++                    response_content=raw_response,
++                    include=response_model_include,
++                    exclude=response_model_exclude,
++                    by_alias=response_model_by_alias,
++                    exclude_unset=response_model_exclude_unset,
++                    exclude_defaults=response_model_exclude_defaults,
++                    exclude_none=response_model_exclude_none,
++                    is_coroutine=is_coroutine,
+                 )
+-                raise validation_error
++                response = actual_response_class(content, **response_args)
++                if not is_body_allowed_for_status_code(response.status_code):
++                    response.body = b""
++                response.headers.raw.extend(solved_result.response.headers.raw)
++        if errors:
++            validation_error = RequestValidationError(
++                _normalize_errors(errors), body=body
++            )
++            raise validation_error
+         if response is None:
+             raise FastAPIError(
+                 "No response object was returned. There's a high chance that the "
+@@ -370,24 +370,21 @@ def get_websocket_app(
+     embed_body_fields: bool = False,
+ ) -> Callable[[WebSocket], Coroutine[Any, Any, Any]]:
+     async def app(websocket: WebSocket) -> None:
+-        async with AsyncExitStack() as async_exit_stack:
+-            # TODO: remove this scope later, after a few releases
+-            # This scope fastapi_astack is no longer used by FastAPI, kept for
+-            # compatibility, just in case
+-            websocket.scope["fastapi_astack"] = async_exit_stack
+-            solved_result = await solve_dependencies(
+-                request=websocket,
+-                dependant=dependant,
+-                dependency_overrides_provider=dependency_overrides_provider,
+-                async_exit_stack=async_exit_stack,
+-                embed_body_fields=embed_body_fields,
++        async_exit_stack = websocket.scope["fastapi_astack"]
++        # TODO: remove this scope later, after a few releases
++        solved_result = await solve_dependencies(
++            request=websocket,
++            dependant=dependant,
++            dependency_overrides_provider=dependency_overrides_provider,
++            async_exit_stack=async_exit_stack,
++            embed_body_fields=embed_body_fields,
++        )
++        if solved_result.errors:
++            raise WebSocketRequestValidationError(
++                _normalize_errors(solved_result.errors)
+             )
+-            if solved_result.errors:
+-                raise WebSocketRequestValidationError(
+-                    _normalize_errors(solved_result.errors)
+-                )
+-            assert dependant.call is not None, "dependant.call must be a function"
+-            await dependant.call(**solved_result.values)
++        assert dependant.call is not None, "dependant.call must be a function"
++        await dependant.call(**solved_result.values)
+ 
+     return app
+ 

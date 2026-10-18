@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "scripts/task_pipeline.py").is_file())
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / "scripts/runs/task_pipeline.py").is_file())
 DEFAULT_BASE = "https://t4r30ysyfmt164-8000.proxy.runpod.net/v1"
 
 

@@ -1,6 +1,6 @@
 import importlib.util,json,tempfile,unittest
 from pathlib import Path
-spec=importlib.util.spec_from_file_location('catalog',Path(__file__).parents[1]/'build_trace_index.py');catalog=importlib.util.module_from_spec(spec);spec.loader.exec_module(catalog)
+spec=importlib.util.spec_from_file_location('catalog',Path(__file__).parents[1]/'traces'/'build_trace_index.py');catalog=importlib.util.module_from_spec(spec);spec.loader.exec_module(catalog)
 class CatalogTests(unittest.TestCase):
  def test_native_only_interrupted_and_completed_are_discoverable(self):
   with tempfile.TemporaryDirectory() as d:

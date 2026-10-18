@@ -1,0 +1,93 @@
+diff --git a/fastapi/_compat/v2.py b/fastapi/_compat/v2.py
+index 0535c806..46d58cd2 100644
+--- a/fastapi/_compat/v2.py
++++ b/fastapi/_compat/v2.py
+@@ -199,6 +199,30 @@ class ModelField:
+             exclude_none=exclude_none,
+         )
+ 
++    def serialize_json(
++        self,
++        value: Any,
++        *,
++        include: IncEx | None = None,
++        exclude: IncEx | None = None,
++        by_alias: bool = True,
++        exclude_unset: bool = False,
++        exclude_defaults: bool = False,
++        exclude_none: bool = False,
++    ) -> bytes:
++        # What calls this code passes a value that already called
++        # self._type_adapter.validate_python(value)
++        # Serializes directly to JSON bytes using Pydantic (Rust) serialization
++        return self._type_adapter.dump_json(
++            value,
++            include=include,
++            exclude=exclude,
++            by_alias=by_alias,
++            exclude_unset=exclude_unset,
++            exclude_defaults=exclude_defaults,
++            exclude_none=exclude_none,
++        )
++
+     def __hash__(self) -> int:
+         # Each ModelField is unique for our purposes, to allow making a dict from
+         # ModelField to its JSON Schema.
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index ea82ab14..5bf065a0 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -271,6 +271,7 @@ async def serialize_response(
+     exclude_none: bool = False,
+     is_coroutine: bool = True,
+     endpoint_ctx: EndpointContext | None = None,
++    dump_json: bool = False,
+ ) -> Any:
+     if field:
+         if is_coroutine:
+@@ -287,6 +288,16 @@ async def serialize_response(
+                 endpoint_ctx=ctx,
+             )
+ 
++        if dump_json:
++            return field.serialize_json(
++                value,
++                include=include,
++                exclude=exclude,
++                by_alias=by_alias,
++                exclude_unset=exclude_unset,
++                exclude_defaults=exclude_defaults,
++                exclude_none=exclude_none,
++            )
+         return field.serialize(
+             value,
+             include=include,
+@@ -336,6 +347,10 @@ def get_request_handler(
+         actual_response_class: type[Response] = response_class.value
+     else:
+         actual_response_class = response_class
++    # When using the default JSON response class with a Pydantic response field,
++    # serialize directly to JSON bytes with Pydantic (Rust) instead of going
++    # through the Python-level JSON encoding.
++    use_pydantic_json = response_field is not None and actual_response_class is JSONResponse
+ 
+     async def app(request: Request) -> Response:
+         response: Response | None = None
+@@ -454,8 +469,16 @@ def get_request_handler(
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
+                     endpoint_ctx=endpoint_ctx,
++                    dump_json=use_pydantic_json,
+                 )
+-                response = actual_response_class(content, **response_args)
++                if use_pydantic_json:
++                    response = Response(
++                        content=content,
++                        media_type="application/json",
++                        **response_args,
++                    )
++                else:
++                    response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+                     response.body = b""
+                 response.headers.raw.extend(solved_result.response.headers.raw)

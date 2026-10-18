@@ -1,0 +1,124 @@
+diff --git a/rich/cells.py b/rich/cells.py
+index a8546227..ccacd7bc 100644
+--- a/rich/cells.py
++++ b/rich/cells.py
+@@ -30,6 +30,82 @@ _SINGLE_CELLS = frozenset(
+ _is_single_cell_widths: Callable[[str], bool] = _SINGLE_CELLS.issuperset
+ 
+ 
++_ZWJ = "\u200d"
++_VARIATION_SELECTOR_16 = "\ufe0f"
++
++
++def _is_grapheme_extender(character: str) -> bool:
++    """Check if a character attaches to the preceding character to form a grapheme."""
++    codepoint = ord(character)
++    if codepoint < 0x20 or 0x7F <= codepoint < 0xA0:
++        return False  # Control characters always start a new grapheme
++    if character == _ZWJ or 0xFE00 <= codepoint <= 0xFE0F:
++        return True  # Zero width joiner and variation selectors
++    if 0x1F3FB <= codepoint <= 0x1F3FF:
++        return True  # Emoji skin tone modifiers
++    if 0xE0020 <= codepoint <= 0xE007F:
++        return True  # Tags
++    return get_character_cell_size(character) == 0
++
++
++def split_graphemes(text: str) -> list[str]:
++    """Split text into a list of grapheme clusters (sequences that render as a single glyph).
++
++    Args:
++        text (str): Text to split.
++
++    Returns:
++        list[str]: List of grapheme clusters.
++    """
++    graphemes: list[str] = []
++    append = graphemes.append
++    current: list[str] = []
++    previous = ""
++    for character in text:
++        if not current:
++            current.append(character)
++        elif (
++            previous == _ZWJ
++            or _is_grapheme_extender(character)
++            or (
++                # Regional indicators pair up to form a flag
++                0x1F1E6 <= ord(character) <= 0x1F1FF
++                and len(current) == 1
++                and 0x1F1E6 <= ord(current[0]) <= 0x1F1FF
++            )
++        ):
++            current.append(character)
++        else:
++            append("".join(current))
++            current = [character]
++        previous = character
++    if current:
++        append("".join(current))
++    return graphemes
++
++
++def _grapheme_cell_size(grapheme: str) -> int:
++    """Get the cell size of a grapheme cluster."""
++    if len(grapheme) == 1:
++        return get_character_cell_size(grapheme)
++    if 0x1F1E6 <= ord(grapheme[0]) <= 0x1F1FF:
++        return 2  # Flag made from a pair of regional indicators
++    width = max(map(get_character_cell_size, grapheme))
++    if (
++        width == 1
++        and _VARIATION_SELECTOR_16 in grapheme
++        and ord(grapheme[0]) > 0x7F
++    ):
++        # Emoji presentation requested by variation selector 16
++        return 2
++    return width
++
++
++def _text_cell_len(text: str) -> int:
++    """Get the cell length of text by summing the width of each grapheme."""
++    return sum(map(_grapheme_cell_size, split_graphemes(text)))
++
++
+ @lru_cache(4096)
+ def cached_cell_len(text: str) -> int:
+     """Get the number of cells required to display text.
+@@ -45,7 +121,7 @@ def cached_cell_len(text: str) -> int:
+     """
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return _text_cell_len(text)
+ 
+ 
+ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> int:
+@@ -61,7 +137,7 @@ def cell_len(text: str, _cell_len: Callable[[str], int] = cached_cell_len) -> in
+         return _cell_len(text)
+     if _is_single_cell_widths(text):
+         return len(text)
+-    return sum(map(get_character_cell_size, text))
++    return _text_cell_len(text)
+ 
+ 
+ @lru_cache(maxsize=4096)
+@@ -142,7 +218,6 @@ def chop_cells(
+         A list of strings such that each string in the list has cell width
+         less than or equal to the available width.
+     """
+-    _get_character_cell_size = get_character_cell_size
+     lines: list[list[str]] = [[]]
+ 
+     append_new_line = lines.append
+@@ -150,8 +225,8 @@ def chop_cells(
+ 
+     total_width = 0
+ 
+-    for character in text:
+-        cell_width = _get_character_cell_size(character)
++    for character in split_graphemes(text):
++        cell_width = _grapheme_cell_size(character)
+         char_doesnt_fit = total_width + cell_width > width
+ 
+         if char_doesnt_fit:

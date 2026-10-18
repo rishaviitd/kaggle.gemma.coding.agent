@@ -1,0 +1,78 @@
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 9ca2f467..d1b72e76 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -143,6 +143,20 @@ def websocket_session(
+     return app
+ 
+ 
++class _DefaultLifespan:
++    def __init__(self, router: "APIRouter"):
++        self._router = router
++
++    async def __aenter__(self) -> None:
++        await self._router._startup()
++
++    async def __aexit__(self, *exc_info: object) -> None:
++        await self._router._shutdown()
++
++    def __call__(self: Any, app: object) -> Any:
++        return self
++
++
+ def _merge_lifespan_context(
+     original_context: Lifespan[Any], nested_context: Lifespan[Any]
+ ) -> Lifespan[Any]:
+@@ -907,10 +921,16 @@ class APIRouter(routing.Router):
+             routes=routes,
+             redirect_slashes=redirect_slashes,
+             default=default,
+-            on_startup=on_startup,
+-            on_shutdown=on_shutdown,
+             lifespan=lifespan,
+         )
++        self.on_startup: list[Callable[[], Any]] = (
++            [] if on_startup is None else list(on_startup)
++        )
++        self.on_shutdown: list[Callable[[], Any]] = (
++            [] if on_shutdown is None else list(on_shutdown)
++        )
++        if lifespan is None:
++            self.lifespan_context: Lifespan[Any] = _DefaultLifespan(self)
+         if prefix:
+             assert prefix.startswith("/"), "A path prefix must start with '/'"
+             assert not prefix.endswith("/"), (
+@@ -947,6 +967,33 @@ class APIRouter(routing.Router):
+ 
+         return decorator
+ 
++    async def _startup(self) -> None:
++        """
++        Run any `.on_startup` event handlers.
++        """
++        for handler in self.on_startup:
++            if is_async_callable(handler):
++                await handler()
++            else:
++                handler()
++
++    async def _shutdown(self) -> None:
++        """
++        Run any `.on_shutdown` event handlers.
++        """
++        for handler in self.on_shutdown:
++            if is_async_callable(handler):
++                await handler()
++            else:
++                handler()
++
++    def add_event_handler(self, event_type: str, func: Callable[[], Any]) -> None:
++        assert event_type in ("startup", "shutdown")
++        if event_type == "startup":
++            self.on_startup.append(func)
++        else:
++            self.on_shutdown.append(func)
++
+     def add_api_route(
+         self,
+         path: str,

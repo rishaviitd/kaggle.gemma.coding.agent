@@ -1,0 +1,105 @@
+diff --git a/fastapi/sse.py b/fastapi/sse.py
+new file mode 100644
+index 00000000..303a852f
+--- /dev/null
++++ b/fastapi/sse.py
+@@ -0,0 +1,99 @@
++import json
++from dataclasses import dataclass
++from typing import Any, AsyncIterable, AsyncIterator, Iterable, Iterator, Mapping
++
++import anyio
++from fastapi.encoders import jsonable_encoder
++from starlette.background import BackgroundTask
++from starlette.responses import StreamingResponse
++
++
++@dataclass
++class ServerSentEvent:
++    """
++    A single Server-Sent Event, to be yielded from an endpoint that uses
++    `EventSourceResponse`.
++
++    If `raw_data` is set, it is sent as-is. Otherwise `data` is JSON-encoded.
++    """
++
++    data: Any = None
++    raw_data: str | None = None
++    event: str | None = None
++    id: str | None = None
++    retry: int | None = None
++    comment: str | None = None
++
++    def __post_init__(self) -> None:
++        if self.data is not None and self.raw_data is not None:
++            raise ValueError("Only one of 'data' or 'raw_data' can be provided")
++
++
++def _format_field(name: str, value: str) -> bytes:
++    lines = value.splitlines() or [""]
++    return b"".join(f"{name}: {line}\n".encode("utf-8") for line in lines)
++
++
++def format_sse_event(item: Any) -> bytes:
++    if not isinstance(item, ServerSentEvent):
++        item = ServerSentEvent(data=item)
++    parts: list[bytes] = []
++    if item.comment is not None:
++        parts.append(_format_field("", item.comment))
++    if item.event is not None:
++        parts.append(_format_field("event", item.event))
++    if item.id is not None:
++        parts.append(_format_field("id", item.id))
++    if item.retry is not None:
++        parts.append(_format_field("retry", str(item.retry)))
++    if item.raw_data is not None:
++        parts.append(_format_field("data", item.raw_data))
++    elif item.data is not None:
++        data = json.dumps(jsonable_encoder(item.data), separators=(",", ":"))
++        parts.append(_format_field("data", data))
++    parts.append(b"\n")
++    return b"".join(parts)
++
++
++class EventSourceResponse(StreamingResponse):
++    """
++    Streaming response with `text/event-stream` media type for Server-Sent Events.
++    Items yielded by the endpoint are formatted as SSE events. Items that are not
++    `ServerSentEvent` instances are sent as JSON in the `data` field.
++    """
++
++    media_type = "text/event-stream"
++
++    def __init__(
++        self,
++        content: Iterable[Any] | AsyncIterable[Any],
++        status_code: int = 200,
++        headers: Mapping[str, str] | None = None,
++        media_type: str | None = None,
++        background: BackgroundTask | None = None,
++    ) -> None:
++        if isinstance(content, AsyncIterable):
++            encoded: AsyncIterator[bytes] | Iterator[bytes] = self._async_encode(
++                content
++            )
++        else:
++            encoded = self._sync_encode(content)
++        super().__init__(
++            content=encoded,
++            status_code=status_code,
++            headers=headers,
++            media_type=media_type,
++            background=background,
++        )
++
++    @staticmethod
++    async def _async_encode(content: AsyncIterable[Any]) -> AsyncIterator[bytes]:
++        async for item in content:
++            yield format_sse_event(item)
++            # To allow for cancellation to trigger
++            await anyio.sleep(0)
++
++    @staticmethod
++    def _sync_encode(content: Iterable[Any]) -> Iterator[bytes]:
++        for item in content:
++            yield format_sse_event(item)

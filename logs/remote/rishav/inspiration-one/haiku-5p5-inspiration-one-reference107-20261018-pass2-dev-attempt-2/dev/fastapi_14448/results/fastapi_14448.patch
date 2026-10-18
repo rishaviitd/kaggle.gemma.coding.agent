@@ -1,0 +1,80 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index 2a4d9a01..61af6191 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -15,6 +15,36 @@ else:  # pragma: no cover
+     from asyncio import iscoroutinefunction
+ 
+ 
++def _get_call_levels(call: Any) -> List[Any]:
++    """
++    Collect every level of a callable chain: partials (``.func``), wrappers
++    (``__wrapped__``, e.g. from functools.wraps) and instance ``__call__``
++    methods, so that async/generator detection looks at all of them.
++    """
++    levels: List[Any] = []
++    seen: set = set()
++    stack: List[Any] = [call]
++    while stack:
++        obj = stack.pop()
++        if obj is None or id(obj) in seen:
++            continue
++        seen.add(id(obj))
++        levels.append(obj)
++        if isinstance(obj, partial):
++            stack.append(obj.func)
++            continue
++        wrapped = getattr(obj, "__wrapped__", None)
++        if wrapped is not None:
++            stack.append(wrapped)
++            continue
++        if inspect.isroutine(obj) or inspect.isclass(obj):
++            continue
++        dunder_call = getattr(obj, "__call__", None)  # noqa: B004
++        if inspect.ismethod(dunder_call) or inspect.isfunction(dunder_call):
++            stack.append(dunder_call)
++    return levels
++
++
+ @dataclass
+ class SecurityRequirement:
+     security_scheme: SecurityBase
+@@ -84,28 +114,24 @@ class Dependant:
+             unwrapped = unwrapped.func
+         return unwrapped
+ 
++    @cached_property
++    def _call_levels(self) -> List[Any]:
++        return _get_call_levels(self.call)
++
+     @cached_property
+     def is_gen_callable(self) -> bool:
+-        if inspect.isgeneratorfunction(self._unwrapped_call):
+-            return True
+-        dunder_call = getattr(self._unwrapped_call, "__call__", None)  # noqa: B004
+-        return inspect.isgeneratorfunction(dunder_call)
++        return any(inspect.isgeneratorfunction(o) for o in self._call_levels)
+ 
+     @cached_property
+     def is_async_gen_callable(self) -> bool:
+-        if inspect.isasyncgenfunction(self._unwrapped_call):
+-            return True
+-        dunder_call = getattr(self._unwrapped_call, "__call__", None)  # noqa: B004
+-        return inspect.isasyncgenfunction(dunder_call)
++        return any(inspect.isasyncgenfunction(o) for o in self._call_levels)
+ 
+     @cached_property
+     def is_coroutine_callable(self) -> bool:
+-        if inspect.isroutine(self._unwrapped_call):
+-            return iscoroutinefunction(self._unwrapped_call)
+-        if inspect.isclass(self._unwrapped_call):
+-            return False
+-        dunder_call = getattr(self._unwrapped_call, "__call__", None)  # noqa: B004
+-        return iscoroutinefunction(dunder_call)
++        return any(
++            not inspect.isclass(o) and iscoroutinefunction(o)
++            for o in self._call_levels
++        )
+ 
+     @cached_property
+     def computed_scope(self) -> Union[str, None]:

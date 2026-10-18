@@ -2,9 +2,7 @@
 
 import copy
 import importlib
-import inspect
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -140,123 +138,129 @@ class ReconstructionTests(unittest.TestCase):
         self.assertIn("OBSERVATION_ONLY", observation["content"])
 
 
-@unittest.skipUnless(os.environ.get("GEMMA_SFT_TOKENIZER"), "Set GEMMA_SFT_TOKENIZER for official-tokenizer checks")
-class OfficialTemplateTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from transformers import AutoTokenizer
-        cls.tokenizer = AutoTokenizer.from_pretrained(os.environ["GEMMA_SFT_TOKENIZER"], local_files_only=True)
-
+class DatasetTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(exporter, "The SFT exporter has not been implemented")
+        self.row = exporter.convert_exchanges(exchanges())
 
-    def test_thinking_mode_and_teacher_reasoning_are_independent(self):
-        self.assertIn("retain_reasoning", inspect.signature(exporter.convert_exchanges).parameters)
-        self.assertIn("enable_thinking", inspect.signature(exporter.encode_example).parameters)
-        for retain in [False, True]:
-            for enable in [False, True]:
-                with self.subTest(retain_reasoning=retain, enable_thinking=enable):
-                    row = exporter.convert_exchanges(exchanges(), retain_reasoning=retain)
-                    encoded = exporter.encode_example(row, self.tokenizer, enable_thinking=enable)
-                    self.assertEqual("<|think|>" in encoded["text"], enable)
-                    self.assertEqual("Inspect first" in encoded["text"], retain)
-                    self.assertEqual("<|channel>thought" in encoded["text"], retain)
-                    expected = self.tokenizer.apply_chat_template(
-                        row["messages"], tools=row["tools"], tokenize=False,
-                        add_generation_prompt=False, enable_thinking=enable, preserve_thinking=retain)
-                    self.assertEqual(encoded["text"], expected)
-                    supervised = self.tokenizer.decode([x for x in encoded["labels"] if x != -100])
-                    self.assertNotIn("<|think|>", supervised)
-                    self.assertEqual("Inspect first" in supervised, retain)
-                    self.assertNotIn("OBSERVATION_ONLY", supervised)
+    def test_prefix_is_one_row_per_model_response_without_teacher_thoughts(self):
+        rows = exporter.build_examples(self.row, mode="prefix", task_id="task", segment=1)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["messages"][-1]["role"], "user")
+        first = rows[0]["completion"]
+        self.assertIsInstance(first, list)
+        self.assertEqual([step["role"] for step in first], ["assistant", "assistant"])
+        self.assertEqual(first[0]["content"], "I will inspect it.")
+        self.assertEqual(first[1]["tool_calls"][0]["function"]["name"], "run_command")
+        self.assertIn("OBSERVATION_ONLY", rows[1]["messages"][-1]["content"])
+        self.assertEqual(rows[1]["completion"]["content"], "Fixed.")
+        steps = first + [rows[1]["completion"]]
+        self.assertTrue(all(row["enable_thinking"] for row in rows))
+        self.assertTrue(all(step["train"] for step in steps))
+        self.assertTrue(all(message.get("train") is False
+                            for row in rows for message in row["messages"] if message["role"] == "assistant"))
+        self.assertNotIn("Inspect first", json.dumps(rows))
+        self.assertNotIn("_train", json.dumps(rows))
 
-    def test_cli_records_independent_settings_and_legacy_alias(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            source = root / "anthropic_exchanges.json"
-            source.write_text(json.dumps(exchanges()))
-            cases = [(["--enable-thinking"], False, True),
-                     (["--retain-reasoning"], True, False),
-                     (["--thinking"], True, True)]
-            for index, (flags, retain, enable) in enumerate(cases):
-                with self.subTest(flags=flags):
-                    output = root / f"out-{index}"
-                    proc = subprocess.run([
-                        sys.executable, str(Path(exporter.__file__)), str(source),
-                        "--output", str(output), "--tokenizer", os.environ["GEMMA_SFT_TOKENIZER"],
-                        "--local-files-only", *flags], capture_output=True, text=True)
-                    self.assertEqual(proc.returncode, 0, proc.stderr)
-                    manifest = json.loads((output / "manifest.json").read_text())
-                    self.assertEqual(manifest["retain_reasoning"], retain)
-                    self.assertEqual(manifest["enable_thinking"], enable)
-                    self.assertEqual(manifest["schema_version"], "gemma4-sft-v2")
-                    self.assertNotIn("thinking", manifest)
-                    text = next((output / "text").glob("*.txt")).read_text()
-                    self.assertEqual("<|think|>" in text, enable)
-                    self.assertEqual("Inspect first" in text, retain)
-                    if flags == ["--thinking"]:
-                        self.assertIn("deprecated", proc.stderr)
+    def test_commentary_and_call_are_never_split_into_two_rows(self):
+        rows = exporter.build_examples(self.row, mode="prefix", task_id="task", segment=1)
+        text_only = [row for row in rows if not isinstance(row["completion"], list)
+                     and not row["completion"].get("tool_calls")]
+        self.assertEqual([row["completion"]["content"] for row in text_only], ["Fixed."])
 
-    def test_legacy_flag_cannot_silently_override_explicit_mode(self):
-        proc = subprocess.run([
-            sys.executable, str(Path(exporter.__file__)), "unused", "--output", "unused-output",
-            "--thinking", "--no-enable-thinking"], capture_output=True, text=True)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("cannot combine", proc.stderr)
+    def test_failed_and_repeated_steps_stay_in_context_but_are_not_supervised(self):
+        def call(turn, call_id, name, args):
+            return {"role": "assistant", "content": "", "_train": True, "_turn": turn, "tool_calls": [
+                {"id": call_id, "type": "function", "function": {"name": name, "arguments": args}}]}
 
-    def test_matches_upstream_and_masks_observations_and_prompts(self):
-        row = exporter.convert_exchanges(exchanges())
-        encoded = exporter.encode_example(row, self.tokenizer)
-        original = self.tokenizer.apply_chat_template(row["messages"], tools=row["tools"],
-            tokenize=False, add_generation_prompt=False, enable_thinking=False)
-        self.assertEqual(encoded["text"], original)
-        self.assertLess(original.index("I will inspect it."), original.index("<|tool_call>"))
-        self.assertLess(original.index("<|tool_call>"), original.index("OBSERVATION_ONLY"))
-        self.assertEqual(original.count("SYSTEM_ONLY"), 1)
-        self.assertEqual(original.count("declaration:run_command"), 1)
-        self.assertEqual(original.count("Fix the bug"), 1)
-        ids = encoded["input_ids"]
-        labels = encoded["labels"]
-        offsets = self.tokenizer(original, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
-        for value in ["SYSTEM_ONLY", "Fix the bug", "OBSERVATION_ONLY", "<tool_response|>"]:
-            start = original.index(value)
-            matching = [i for i, (a, b) in enumerate(offsets) if a < start + len(value) and b > start]
-            self.assertTrue(matching)
-            self.assertTrue(all(labels[i] == -100 for i in matching), value)
-        supervised = self.tokenizer.decode([t for t, label in zip(ids, labels) if label != -100])
-        self.assertIn("I will inspect it.", supervised)
-        self.assertIn("call:run_command", supervised)
-        self.assertIn("<|tool_response>", supervised)
-        self.assertIn("Fixed.", supervised)
-        self.assertTrue(original.endswith("<turn|>\n"))
-        self.assertIn(self.tokenizer.convert_tokens_to_ids("<turn|>"), labels)
+        def result(call_id, body):
+            return {"role": "tool", "tool_call_id": call_id, "name": "x", "content": json.dumps(body)}
+        messages = [{"role": "system", "content": "S"}, {"role": "user", "content": "T"},
+                    call(1, "a", "run_command", {"command": "pytest"}), result("a", {"status": "ok"}),
+                    call(2, "b", "run_command", {"command": "pytest"}), result("b", {"status": "ok"}),
+                    call(3, "c", "edit_file", {"path": "f"}), result("c", {"status": "error"}),
+                    call(4, "d", "edit_file", {"path": "g"}), result("d", {"status": "ok"}),
+                    call(5, "e", "run_command", {"command": "pytest"}), result("e", {"status": "ok"}),
+                    {"role": "assistant", "content": "Done.", "_train": True, "_turn": 6}]
+        marked = exporter.mask_unsound_steps(messages)
+        flags = {m["_turn"]: m["_train"] for m in marked if m["role"] == "assistant"}
+        self.assertEqual(flags, {1: True, 2: False, 3: False, 4: True, 5: True, 6: True})
+        rows = exporter.build_examples({"messages": messages, "tools": []}, mode="prefix", task_id="t", segment=1)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(messages), 13)
+        trajectory = exporter.build_examples({"messages": messages, "tools": []}, mode="trajectory",
+                                             task_id="t", segment=1)[0]["messages"]
+        self.assertEqual(sum(1 for m in trajectory if m["role"] == "assistant" and not m["train"]), 2)
 
-    def test_excluded_turn_is_context_only_and_thinking_is_optional(self):
-        row = exporter.convert_exchanges(exchanges(), retain_reasoning=True, exclude_turns={1})
-        encoded = exporter.encode_example(row, self.tokenizer, enable_thinking=True)
-        self.assertIn("Inspect first", encoded["text"])
-        supervised = self.tokenizer.decode([x for x in encoded["labels"] if x != -100])
-        self.assertNotIn("Inspect first", supervised)
-        self.assertNotIn("run_command", supervised)
-        self.assertIn("Fixed.", supervised)
-        included = exporter.encode_example(exporter.convert_exchanges(exchanges(), retain_reasoning=True),
-                                           self.tokenizer, enable_thinking=True)
-        supervised = self.tokenizer.decode([x for x in included["labels"] if x != -100])
-        self.assertIn("Inspect first", supervised)
+    def test_shortened_tool_result_stays_valid_json_and_keeps_both_ends(self):
+        body = {"status": "error", "error_message": "HEAD" + "x" * 9000 + "TAIL",
+                "details": {"stderr": "A" * 5000}, "exit_code": 1}
+        short = exporter.shorten_tool_result(json.dumps(body), 3000)
+        parsed = json.loads(short)
+        self.assertLessEqual(len(short), 3100)
+        self.assertEqual(parsed["status"], "error")
+        self.assertEqual(parsed["exit_code"], 1)
+        self.assertTrue(parsed["error_message"].startswith("HEAD") and parsed["error_message"].endswith("TAIL"))
+        self.assertIn("chars omitted", short)
+        small = json.dumps({"status": "ok"})
+        self.assertEqual(exporter.shorten_tool_result(small, 3000), small)
 
-    def test_rejects_length_overflow_without_silent_truncation(self):
-        with self.assertRaisesRegex(ValueError, "max_length"):
-            exporter.encode_example(exporter.convert_exchanges(exchanges()), self.tokenizer, max_length=10)
+    def test_trajectory_is_one_row_and_exclude_turn_drops_only_prefix_targets(self):
+        rows = exporter.build_examples(self.row, mode="trajectory", task_id="task", segment=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["messages"][-1]["content"], "Fixed.")
+        self.assertNotIn("completion", rows[0])
+        excluded = exporter.convert_exchanges(exchanges(), exclude_turns={1})
+        prefix = exporter.build_examples(excluded, mode="prefix", task_id="task", segment=1)
+        self.assertEqual([row["completion"]["content"] for row in prefix], ["Fixed."])
+        trajectory = exporter.build_examples(excluded, mode="trajectory", task_id="task", segment=1)
+        assistants = [message for message in trajectory[0]["messages"] if message["role"] == "assistant"]
+        self.assertEqual([message["train"] for message in assistants], [False, False, True])
+        self.assertEqual(assistants[-1]["content"], "Fixed.")
 
-    def test_thinking_before_a_later_user_turn_is_not_silently_discarded(self):
+    def test_compaction_carryover_is_not_trained_again(self):
+        data = exchanges()
+        summary = {"request": {"messages": [{"role": "user", "content": [{
+            "type": "text", "text": exporter.SUMMARY_PROMPT + " Please summarize..."}]}]},
+            "response_status": 200,
+            "response": {"role": "assistant", "content": [{"type": "text", "text": "SUMMARY"}],
+                         "stop_reason": "end_turn"}}
+        carried = copy.deepcopy(data[1]["request"]["messages"][1:])
+        after = {"request": {**copy.deepcopy(data[1]["request"]), "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "For context: SUMMARY"}]}] + carried},
+            "response_status": 200,
+            "response": {"role": "assistant", "content": [{"type": "text", "text": "Resumed."}],
+                         "stop_reason": "end_turn"}}
+        segment = exporter.convert_task(data + [summary, after])[1]
+        trajectory = exporter.build_examples(segment, mode="trajectory", task_id="task", segment=2)
+        trained = [message["content"] for message in trajectory[0]["messages"]
+                   if message["role"] == "assistant" and message["train"]]
+        self.assertEqual(trained, ["Resumed."])
+        prefix = exporter.build_examples(segment, mode="prefix", task_id="task", segment=2)
+        self.assertEqual([row["completion"]["content"] for row in prefix], ["Resumed."])
+
+    def test_retained_reasoning_stays_on_the_assistant_message(self):
         row = exporter.convert_exchanges(exchanges(), retain_reasoning=True)
-        row["messages"].extend([
-            {"role": "user", "content": "One more change"},
-            {"role": "assistant", "content": "Done", "_turn": 3, "_train": True},
-        ])
-        for enable in [False, True]:
-            with self.subTest(enable_thinking=enable), self.assertRaisesRegex(ValueError, "thinking.*user|reasoning.*user"):
-                exporter.encode_example(row, self.tokenizer, enable_thinking=enable)
+        prefix = exporter.build_examples(row, mode="prefix", task_id="task", segment=1, enable_thinking=False)
+        self.assertEqual(prefix[0]["completion"][0]["reasoning"], "Inspect first")
+        self.assertFalse(prefix[0]["enable_thinking"])
+
+    def test_truncation_keeps_the_opening_user_and_does_not_split_tool_results(self):
+        messages = [{"role": "system", "content": "SYSTEM"},
+                    {"role": "user", "content": "TASK " + ("x" * 50)}]
+        for index in range(6):
+            messages.append({"role": "assistant", "content": f"step-{index}", "_train": True, "_turn": index + 1})
+            messages.append({"role": "tool", "tool_call_id": f"id-{index}", "name": "run_command", "content": "obs" * 40})
+        messages[-2] = {"role": "assistant", "tool_calls": [{"id": "id-last", "type": "function", "function": {
+            "name": "run_command", "arguments": {"command": "y" * 80}}}], "content": "", "_train": True, "_turn": 7}
+        clipped = exporter.truncate_messages(messages, max_messages=5, max_chars=20)
+        self.assertEqual(clipped[0]["content"], "SYSTEM")
+        self.assertEqual(clipped[1]["content"], "TASK " + ("x" * 50))
+        self.assertLessEqual(len(clipped), 5)
+        self.assertIn("[truncated]", clipped[-1]["content"])
+        self.assertEqual(clipped[-2]["tool_calls"][0]["function"]["arguments"]["command"], "y" * 80)
+        self.assertNotIn("_train", json.dumps(clipped))
+        self.assertNotIn("_truncated", json.dumps(clipped))
 
     def test_failed_batch_does_not_publish_partial_output(self):
         with tempfile.TemporaryDirectory() as d:
@@ -266,31 +270,140 @@ class OfficialTemplateTests(unittest.TestCase):
                 task.mkdir(parents=True)
                 (task / "anthropic_exchanges.json").write_text(json.dumps(data))
             proc = subprocess.run([sys.executable, str(Path(exporter.__file__)), str(root / "input"),
-                "--output", str(root / "out"), "--tokenizer", os.environ["GEMMA_SFT_TOKENIZER"],
-                "--local-files-only"], capture_output=True, text=True)
+                "--mode", "trajectory", "--output", str(root / "out")], capture_output=True, text=True)
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("missing final tool result", proc.stderr)
             self.assertFalse((root / "out").exists())
             self.assertFalse(list(root.glob(".sft-export-*")))
 
-    def test_cli_writes_loadable_labels_and_refuses_overwrite(self):
+    def test_cli_writes_both_modes_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             task = root / "input" / "task"
             task.mkdir(parents=True)
             (task / "anthropic_exchanges.json").write_text(json.dumps(exchanges()))
-            cmd = [sys.executable, str(Path(exporter.__file__)), str(root / "input"),
-                   "--output", str(root / "out"), "--tokenizer", os.environ["GEMMA_SFT_TOKENIZER"],
-                   "--local-files-only"]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            row = json.loads((root / "out" / "train.jsonl").read_text())
-            self.assertEqual(len(row["input_ids"]), len(row["labels"]))
-            self.assertEqual(len(row["input_ids"]), len(row["attention_mask"]))
-            manifest = json.loads((root / "out" / "manifest.json").read_text())
-            self.assertEqual(manifest["examples"], 1)
-            self.assertTrue(manifest["references"])
-            self.assertNotEqual(subprocess.run(cmd, capture_output=True).returncode, 0)
+            for mode, count in [("prefix", 2), ("trajectory", 1)]:
+                output = root / mode
+                cmd = [sys.executable, str(Path(exporter.__file__)), str(root / "input"),
+                       "--mode", mode, "--output", str(output)]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                rows = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
+                self.assertEqual(len(rows), count)
+                self.assertTrue(all(row["mode"] == mode and row["enable_thinking"] for row in rows))
+                manifest = json.loads((output / "manifest.json").read_text())
+                self.assertEqual(manifest["schema_version"], "gemma4-sft-v4")
+                self.assertEqual(manifest["examples"], count)
+                self.assertFalse(manifest["retain_reasoning"])
+                self.assertNotEqual(subprocess.run(cmd, capture_output=True).returncode, 0)
+
+class CompactObservationTests(unittest.TestCase):
+    def hindsight(self, messages):
+        return exporter.compact_observations(messages, policy="hindsight")
+
+    def messages(self, read_text, command_out, old_string):
+        def call(cid, name, args):
+            return {"role": "assistant", "content": "", "tool_calls": [
+                {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}]}
+        def result(cid, data):
+            return {"role": "tool", "tool_call_id": cid, "content": json.dumps(data)}
+        return [
+            call("r", "read_file", {"filepath": "a.py"}),
+            result("r", {"status": "ok", "content": read_text, "start_line": 1, "end_line": 200,
+                         "total_lines": 200, "is_truncated": False}),
+            call("c", "run_command", {"command": "pytest"}),
+            result("c", {"status": "ok", "stdout": command_out, "stderr": "", "exit_code": 1}),
+            call("e", "edit_file", {"filepath": "a.py", "old_string": old_string, "new_string": "x"}),
+            result("e", {"status": "ok", "occurrences": 1, "diff": "d\n" * 600, "is_truncated": False}),
+        ]
+
+    def test_read_keeps_lines_a_later_edit_copies(self):
+        text = "\n".join(f"line_number_{i} = {i}" for i in range(200))
+        out = self.hindsight(self.messages(text, "ok", "line_number_150 = 150\nline_number_151 = 151"))
+        body = json.loads(out[1]["content"])
+        self.assertIn("line_number_150 = 150", body["content"])
+        self.assertIn("line_number_151 = 151", body["content"])
+        self.assertLess(len(out[1]["content"]), 2400)
+        self.assertTrue(body["is_truncated"])
+        self.assertIn("lines omitted", body["content"])
+
+    def test_repeated_boilerplate_does_not_scatter_the_window(self):
+        func = lambda n: f"def func_{n}(x):\n    origin = get_origin(x)\n    if origin is Union:\n        pass\n"
+        text = "\n".join(func(n) for n in range(30))
+        old = "    origin = get_origin(x)\n    if origin is Union:\n        pass\n\ndef func_20(x):"
+        out = self.hindsight(self.messages(text, "ok", old))
+        content = json.loads(out[1]["content"])["content"]
+        self.assertIn("def func_20(x):", content)
+        self.assertEqual(content.count("lines omitted"), 2)
+        self.assertEqual(content.count("origin = get_origin(x)"), 2)
+
+    def test_read_without_edit_is_cut_to_budget_from_the_top(self):
+        text = "\n".join(f"line_number_{i} = {i}" for i in range(200))
+        out = self.hindsight(self.messages(text, "ok", "never_in_file_text"))
+        body = json.loads(out[1]["content"])
+        self.assertTrue(body["content"].startswith("line_number_0 = 0"))
+        self.assertLess(len(body["content"]), exporter.READ_UNUSED_BUDGET + 80)
+        self.assertEqual(body["start_line"], 1)
+
+    def test_command_output_keeps_the_tail_and_exit_code(self):
+        out_text = "\n".join(f"noise line {i}" for i in range(300)) + "\n3 failed, 10 passed in 1.2s"
+        out = self.hindsight(self.messages("x", out_text, "nothing"))
+        body = json.loads(out[3]["content"])
+        self.assertTrue(body["stdout"].endswith("3 failed, 10 passed in 1.2s"))
+        self.assertEqual(body["exit_code"], 1)
+        self.assertLess(len(body["stdout"]), exporter.RUN_BUDGET + 80)
+
+    def test_edit_diff_is_cut_but_status_stays(self):
+        out = self.hindsight(self.messages("x", "ok", "nothing"))
+        body = json.loads(out[5]["content"])
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["occurrences"], 1)
+        self.assertLess(len(body["diff"]), exporter.DIFF_BUDGET + 80)
+
+    def test_short_results_are_returned_unchanged(self):
+        messages = self.messages("a = 1", "ok", "a = 1")
+        out = self.hindsight(messages)
+        self.assertEqual(out[1]["content"], messages[1]["content"])
+        self.assertEqual(out[3]["content"], messages[3]["content"])
+
+
+class CausalObservationTests(unittest.TestCase):
+    def tool_message(self, name, data):
+        return [{"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "x", "type": "function", "function": {"name": name, "arguments": {}}}]},
+                {"role": "tool", "tool_call_id": "x", "content": json.dumps(data)}]
+
+    def test_short_results_are_untouched(self):
+        messages = self.tool_message("read_file", {"status": "ok", "content": "a\n" * 100, "is_truncated": False})
+        self.assertEqual(exporter.compact_observations(messages)[1]["content"], messages[1]["content"])
+
+    def test_long_command_output_keeps_head_and_tail_and_counts_elision(self):
+        out = "\n".join(f"line {i}" for i in range(2000)) + "\n5 passed in 1s"
+        messages = self.tool_message("run_command", {"status": "ok", "stdout": out, "stderr": "", "exit_code": 0})
+        body = json.loads(exporter.compact_observations(messages)[1]["content"])
+        self.assertTrue(body["stdout"].startswith("line 0"))
+        self.assertTrue(body["stdout"].endswith("5 passed in 1s"))
+        self.assertRegex(body["stdout"], r"\[\d+ characters elided\]")
+        self.assertLessEqual(len(body["stdout"]), exporter.CAUSAL_LIMITS["run_command"][1] + 60)
+        self.assertEqual(body["exit_code"], 0)
+
+    def test_cut_never_depends_on_later_messages(self):
+        text = "\n".join(f"code_{i} = {i}" for i in range(400))
+        first = self.tool_message("read_file", {"status": "ok", "content": text, "is_truncated": False})
+        later = [{"role": "assistant", "content": "", "tool_calls": [{"id": "e", "type": "function", "function": {
+            "name": "edit_file", "arguments": {"filepath": "a", "old_string": "code_300 = 300", "new_string": "z"}}}]}]
+        alone = exporter.compact_observations(first)[1]["content"]
+        with_future = exporter.compact_observations(first + later)[1]["content"]
+        self.assertEqual(alone, with_future)
+        self.assertTrue(json.loads(alone)["is_truncated"])
+
+    def test_none_policy_keeps_every_result_byte_for_byte(self):
+        messages = self.tool_message("read_file", {"status": "ok", "content": "x\n" * 50000})
+        self.assertEqual(exporter.compact_observations(messages, policy="none"), messages)
+
+    def test_unknown_policy_is_rejected(self):
+        with self.assertRaises(ValueError):
+            exporter.compact_observations([], policy="nope")
 
 
 if __name__ == "__main__":

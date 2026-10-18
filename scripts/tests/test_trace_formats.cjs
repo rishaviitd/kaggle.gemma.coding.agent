@@ -1,9 +1,9 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
-const html=fs.readFileSync('index.html','utf8');
+const html=fs.readFileSync('viewer/index.html','utf8');
 assert.ok(html.includes('trace-formats.js'),'viewer must load provider normalizers');
-const context={};vm.createContext(context);vm.runInContext(fs.readFileSync('trace-formats.js','utf8'),context);
+const context={};vm.createContext(context);vm.runInContext(fs.readFileSync('viewer/trace-formats.js','utf8'),context);
 const native=[
   {request:{contents:[{role:'user',parts:[{text:'Read example.py'}]}]},response_status:200,
     response:{candidates:[{content:{parts:[{thought:true,text:'Inspect the file'},
@@ -26,5 +26,5 @@ const ordinary={turns:[{turn:1,output:{assistant_content:'existing'}}]};
 assert.equal(vm.runInContext('TraceFormats',context).normalize(ordinary,[],{}),ordinary,'existing model traces remain intact');
 console.log('Trace rendering formats passed');
 const workflow=fs.readFileSync('.github/workflows/pages.yml','utf8');
-assert.ok(workflow.includes('cp trace-formats.js _site/trace-formats.js'),'Pages must ship the native trace renderer');
-assert.ok(workflow.includes('scripts/build_trace_index.py'),'Pages must use the shared catalog for every split');
+assert.ok(workflow.includes('cp viewer/trace-formats.js _site/trace-formats.js'),'Pages must ship the native trace renderer');
+assert.ok(workflow.includes('scripts/traces/build_trace_index.py'),'Pages must use the shared catalog for every split');

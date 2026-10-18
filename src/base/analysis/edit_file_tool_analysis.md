@@ -182,11 +182,11 @@ The parser works correctly when `<|"|>` is used.
 | Layer | Changeable? | Evidence |
 |---|---|---|
 | `edit_file` code (repair broken args, better error) | No | `src/base/tools/workspace.py` is identical to the installed `swegemma/tools/workspace.py`. The harness builds tools with its own `create_tools(ctx)` (`swegemma/harness/agent_runner.py`). `scripts/task_pipeline.py` `prepare_agent` skips `tools` when copying the submission. |
-| vLLM `gemma4` parser and chat template | No | The harness starts vLLM with `tool_call_parser='gemma4'` (`context/harness.md` section 3). |
+| vLLM `gemma4` parser and chat template | No | The harness starts vLLM with `tool_call_parser='gemma4'` (`docs/context/harness.md` section 3). |
 | ADK "mandatory input parameters" error | No | Comes from `google/adk/tools/function_tool.py`. |
 | Callbacks (rewrite arguments or history) | Very likely no | `compile_submission` is called without a `callback_registry` in `agent_runner.py`. |
 | Tools enabled, prompt, skills, sampling settings, sub-agents | Yes | `agent.yaml`, `prompts/system.md`, `skills/`, `configs/sampling.yaml`, `sub_agents/` |
-| LoRA adapters | Yes | `adapters/main_lora`, `adapters/tool_lora` (`context/harness.md` section 3.4) |
+| LoRA adapters | Yes | `adapters/main_lora`, `adapters/tool_lora` (`docs/context/harness.md` section 3.4) |
 
 Fixing the tool locally (repairing arguments inside `edit_file`) would make local runs score better than the competition would, because the competition uses the harness's own tool code.
 

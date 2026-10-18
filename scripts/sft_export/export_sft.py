@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export raw Anthropic task folders to masked, tokenized Gemma 4 SFT JSONL.
+"""Export raw Anthropic task folders to prefix or trajectory SFT JSONL.
 
 References are attached to the behavior they inform, and copied to manifest.json:
 [1] Google canonical E4B template (pinned; never invent the control-token format):
@@ -24,11 +24,8 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-import uuid
-
 MODEL = "google/gemma-4-E4B-it"
 REVISION = "ee0ef6023621cff504d758262d4e04895a5af4a2"
-TEMPLATE_SHA256 = "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
 REFERENCES = [
     f"https://huggingface.co/{MODEL}/blob/{REVISION}/chat_template.jinja",
     "https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4",
@@ -296,205 +293,528 @@ def convert_exchanges(exchanges, *, retain_reasoning=False, exclude_turns=None, 
     return {"messages": messages, "tools": tools}
 
 
-def annotated_template(source):
-    """[1,4] Instrument known output sites; leave environment observations unlabelled.
+def clip_text(value, max_chars):
+    if not isinstance(value, str) or max_chars <= 0 or len(value) <= max_chars:
+        return value
+    marker = "…[truncated]"
+    return value[:max(0, max_chars - len(marker))] + marker
 
-    Markers give exact character spans even inside Jinja macros/captured blocks.
-    Removing them MUST reproduce upstream output byte-for-byte (checked per row).
+
+def head_tail(value, keep):
+    """Keep the start and end of a long string and say how much was left out."""
+    if len(value) <= keep:
+        return value
+    head = int(keep * 0.6)
+    tail = max(1, keep - head)
+    return f"{value[:head]}\n…[{len(value) - head - tail} chars omitted]…\n{value[-tail:]}"
+
+
+def shorten_tool_result(content, max_chars):
+    """Shorten one tool observation and keep it valid JSON when it was JSON.
+
+    Only the longest string fields (file text, stdout, a diff) are cut, from the
+    middle, so status fields and the start and end of the output survive. The
+    observation is masked in the loss, so this changes cost, not supervision.
     """
-    if hashlib.sha256(source.encode()).hexdigest() != TEMPLATE_SHA256:
-        raise ValueError("Unsupported chat template revision; use the documented pinned E4B tokenizer")
-    train = "message.get('_train', true)"
+    if not isinstance(content, str) or max_chars <= 0 or len(content) <= max_chars:
+        return content
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        data = None
+    if not isinstance(data, dict):
+        return head_tail(content, max_chars) if max_chars >= 200 else clip_text(content, max_chars)
+    def string_slots(node):
+        items = node.items() if isinstance(node, dict) else enumerate(node)
+        for key, value in items:
+            if isinstance(value, str):
+                yield node, key
+            elif isinstance(value, (dict, list)):
+                yield from string_slots(value)
 
-    def replace(old, new, count=1):
-        nonlocal source
-        if source.count(old) != count:
-            raise ValueError("Upstream chat template anchor changed")
-        source = source.replace(old, new)
-
-    def emit(expr, condition):
-        return "{{- sft_emit(" + expr + ", " + condition + ") -}}"
-
-    replace("format_tool_response_block(tool_name, response)",
-            "format_tool_response_block(tool_name, response, supervise=false)")
-    marker = "{{- '<|tool_response>' -}}"
-    # Only the first tool-response opener is a model-generated stop token. [2]
-    source = source.replace(marker, emit("'<|tool_response>'", "supervise"), 1)
-    replace(marker, emit("'<|tool_response>'", train))
-    calls = [
-        "tool_response['name'] | default('unknown', true), tool_response['response']",
-        "ns_tname.name, tool_body", "ns_tname.name, ns_txt.s",
-    ]
-    for args in calls:
-        old = "format_tool_response_block(" + args + ")"
-        replace(old, "format_tool_response_block(" + args + ", supervise=" + train + " and not ns_tr_out.flag)",
-                count=2 if args == "ns_tname.name, tool_body" else 1)
-    expression = "'<|channel>thought\\n' + thinking_text + '\\n<channel|>'"
-    replace("{{- " + expression + " -}}", emit(expression, train))
-    start = "{{- '<|tool_call>call:' + function['name'] + '{' -}}"
-    end = "{{- '}<tool_call|>' -}}"
-    replace(start, "{%- if " + train + " -%}{{- sft_start -}}{%- endif -%}" + start)
-    replace(end, end + "{%- if " + train + " -%}{{- sft_end -}}{%- endif -%}")
-    replace("{{- captured_content -}}", emit("captured_content", "role == 'model' and " + train))
-    # The earlier identical end-turn expression belongs to the system prompt.
-    marker = "{{- '<turn|>\\n' -}}"
-    before, sep, after = source.rpartition(marker)
-    if not sep:
-        raise ValueError("Missing model end-turn marker")
-    source = before + emit("'<turn|>\\n'", "role == 'model' and " + train) + after
-    macro = ("{%- macro sft_emit(value, supervise) -%}"
-             "{%- if supervise and value -%}{{- sft_start -}}{{- value -}}{{- sft_end -}}"
-             "{%- else -%}{{- value -}}{%- endif -%}{%- endmacro -%}")
-    return macro + source
-
-
-def remove_markers(marked, start, end):
-    parts, spans, position, active = [], [], 0, None
-    while marked:
-        a, b = marked.find(start), marked.find(end)
-        if a == b == -1:
-            parts.append(marked)
+    for _ in range(24):
+        text = json.dumps(data, ensure_ascii=False)
+        if len(text) <= max_chars:
+            return text
+        slots = list(string_slots(data))
+        if not slots:
             break
-        is_start = a != -1 and (b == -1 or a < b)
-        index, marker = (a, start) if is_start else (b, end)
-        parts.append(marked[:index])
-        position += index
-        if is_start:
-            if active is not None:
-                raise ValueError("Nested supervision markers")
-            active = position
-        else:
-            if active is None:
-                raise ValueError("Unbalanced supervision markers")
-            spans.append((active, position))
-            active = None
-        marked = marked[index + len(marker):]
-    if active is not None:
-        raise ValueError("Unclosed supervision marker")
-    return "".join(parts), spans
+        node, key = max(slots, key=lambda slot: len(slot[0][slot[1]]))
+        current = node[key]
+        if len(current) <= 120:
+            break
+        excess = len(text) - max_chars
+        node[key] = head_tail(current, max(100, len(current) - excess - 80))
+    return head_tail(json.dumps(data, ensure_ascii=False), max_chars)
 
 
-def encode_example(example, tokenizer, *, enable_thinking=False, max_length=32768):
-    """[3,4] Tokenize once, mask non-generated tokens, never silently truncate."""
-    if not tokenizer.is_fast:
-        raise ValueError("A fast tokenizer with character offsets is required")
-    # [1,2] The inference template strips non-tool reasoning before the last
-    # actual user turn. Fail explicitly rather than silently lose SFT targets.
-    last_user = max((i for i, m in enumerate(example["messages"]) if m["role"] == "user"), default=-1)
-    if any(m.get("reasoning") and not m.get("tool_calls")
-           for m in example["messages"][:max(last_user, 0)]):
-        raise ValueError("Retained thinking before a later user turn would be stripped; split this trajectory")
-    source = tokenizer.get_chat_template()
-    annotated = annotated_template(source)
-    common = dict(tools=example["tools"], tokenize=False, add_generation_prompt=False,
-                  enable_thinking=enable_thinking,
-                  preserve_thinking=any(m.get("reasoning") for m in example["messages"]))
-    original = tokenizer.apply_chat_template(example["messages"], **common)
-    salt = uuid.uuid4().hex
-    start, end = f"\ue000SFT_START_{salt}\ue001", f"\ue000SFT_END_{salt}\ue001"
-    marked = tokenizer.apply_chat_template(example["messages"], chat_template=annotated,
-                                           sft_start=start, sft_end=end, **common)
-    text, spans = remove_markers(marked, start, end)
-    if text != original:
-        raise ValueError("Annotated rendering differs from the official template")
-    encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True, truncation=False)
-    ids, offsets = encoded["input_ids"], encoded["offset_mapping"]
-    if len(ids) > max_length:
-        raise ValueError(f"Sequence has {len(ids)} tokens, exceeds max_length={max_length}; no truncation applied")
-    # A token crossing a masked boundary stays masked. Merge adjacent spans first.
-    merged = []
-    for a, b in spans:
-        if merged and a <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+# Observation budgets in characters. Tool results are masked in the loss, so they only need to
+# show the model what happened. The block of text that a later edit_file copies as old_string is
+# always kept (with a few lines around it), because the model has to see what it must reproduce.
+# A read that no later edit uses keeps only a short head.
+READ_UNUSED_BUDGET, READ_PIN_CAP = 400, 2500
+RUN_BUDGET, RUN_PIN_CAP, STDERR_BUDGET = 600, 1600, 300
+DIFF_BUDGET = 300
+LINE_CAP = 240
+PIN_CONTEXT = 3
+
+
+def normalize_path(path):
+    path = str(path or "")
+    return path if path.startswith("/") else "/workspace/" + path
+
+
+def edit_blocks(messages, start):
+    """(path, stripped old_string lines) for every edit_file call after ``start``."""
+    blocks = []
+    for message in messages[start:]:
+        for call in (message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
+            function = call.get("function", {})
+            if function.get("name") != "edit_file":
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    continue
+            arguments = arguments or {}
+            old = [line.strip() for line in str(arguments.get("old_string", "")).split("\n")]
+            while old and not old[0]:
+                old.pop(0)
+            while old and not old[-1]:
+                old.pop()
+            if old and sum(len(line) for line in old) >= 6:
+                blocks.append((normalize_path(arguments.get("filepath")), old, str(arguments.get("old_string", ""))))
+    return blocks
+
+
+def find_block(lines, block, raw=""):
+    """(first line, line count) of the block; None when it is absent.
+
+    Tries the exact old_string first (it may start or end in the middle of a line), then the
+    stripped lines, then a single long line anywhere inside a line.
+    """
+    text = "\n".join(lines)
+    at = text.find(raw) if raw else -1
+    if at >= 0:
+        first = text.count("\n", 0, at)
+        return first, raw.count("\n") + 1
+    stripped = [line.strip() for line in lines]
+    width = len(block)
+    for i in range(len(stripped) - width + 1):
+        if stripped[i:i + width] == block:
+            return i, width
+    if width == 1 and len(block[0]) >= 12:
+        for i, line in enumerate(stripped):
+            if block[0] in line:
+                return i, 1
+    return None
+
+
+def compact_lines(text, budget, pin_cap, blocks, tail_share, fill_when_pinned=True):
+    """Keep each edited block (plus context), then fill what is left of the budget.
+
+    The fill goes to the end of the text for command output (the test summary is there) and to
+    the start for file text. Gaps are marked with how many lines were left out.
+    """
+    lines = text.split("\n")
+    pinned = set()
+    for block, raw in blocks:
+        found = find_block(lines, block, raw)
+        if found is None:
+            continue
+        i, width = found
+        window = set(range(max(0, i - PIN_CONTEXT), min(len(lines), i + width + PIN_CONTEXT)))
+        if sum(len(lines[j]) + 1 for j in pinned | window) <= pin_cap:
+            pinned |= window
+    keep = set(pinned)
+    room = budget - sum(len(lines[i]) + 1 for i in keep)
+    if pinned and not fill_when_pinned:
+        room = 0
+    if room > 0:
+        tail_room = int(room * tail_share)
+        for i in range(len(lines) - 1, -1, -1):
+            if i in keep:
+                continue
+            if tail_room - (len(lines[i]) + 1) < 0:
+                break
+            keep.add(i)
+            tail_room -= len(lines[i]) + 1
+        head_room = room - int(room * tail_share) + tail_room
+        for i in range(len(lines)):
+            if i in keep:
+                continue
+            if head_room - (len(lines[i]) + 1) < 0:
+                break
+            keep.add(i)
+            head_room -= len(lines[i]) + 1
+    if len(keep) == len(lines):
+        return text, False
+    out, gap = [], 0
+    for i, line in enumerate(lines):
+        if i in keep:
+            if gap:
+                out.append(f"…[{gap} lines omitted]…")
+                gap = 0
+            out.append(line if i in pinned or len(line) <= LINE_CAP else line[:LINE_CAP] + "…")
         else:
-            merged.append((a, b))
-    labels, index = [], 0
-    for token, (a, b) in zip(ids, offsets):
-        while index < len(merged) and merged[index][1] <= a:
+            gap += 1
+    if gap:
+        out.append(f"…[{gap} lines omitted]…")
+    return "\n".join(out), True
+
+
+def compact_observation(name, content, blocks):
+    try:
+        data = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content
+    if not isinstance(data, dict):
+        return content
+    changed = False
+    if name == "read_file" and isinstance(data.get("content"), str):
+        path = normalize_path(data.get("filepath")) if data.get("filepath") else None
+        mine = [(block, raw) for block_path, block, raw in blocks if path is None or block_path == path]
+        data["content"], changed = compact_lines(data["content"], READ_UNUSED_BUDGET, READ_PIN_CAP, mine, 0.0, fill_when_pinned=False)
+        if changed:
+            data["is_truncated"] = True
+    elif name == "run_command":
+        mine = [(block, raw) for _path, block, raw in blocks]
+        if isinstance(data.get("stdout"), str):
+            data["stdout"], changed = compact_lines(data["stdout"], RUN_BUDGET, RUN_PIN_CAP, mine, 0.7)
+        if isinstance(data.get("stderr"), str):
+            data["stderr"], err_changed = compact_lines(data["stderr"], STDERR_BUDGET, STDERR_BUDGET, [], 0.7)
+            changed = changed or err_changed
+    elif name == "edit_file" and isinstance(data.get("diff"), str):
+        data["diff"], changed = compact_lines(data["diff"], DIFF_BUDGET, DIFF_BUDGET, [], 0.0)
+    if not changed:
+        return content
+    return json.dumps(data, ensure_ascii=False)
+
+
+def compact_observations_hindsight(messages):
+    """Shrink results using later edits to decide what to keep (peeks at the future)."""
+    names = {}
+    for message in messages:
+        for call in (message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
+            names[call.get("id")] = call.get("function", {}).get("name")
+    out = []
+    for index, message in enumerate(messages):
+        message = dict(message)
+        if message.get("role") == "tool" and isinstance(message.get("content"), str):
+            name = names.get(message.get("tool_call_id"))
+            if name in {"read_file", "run_command", "edit_file"}:
+                message["content"] = compact_observation(name, message["content"], edit_blocks(messages, index + 1))
+        out.append(message)
+    return out
+
+
+# Causal policy: the cut depends only on the observation itself, like the harnesses that produced
+# public SWE-agent SFT data (mini-SWE-agent keeps the first and last 5000 of outputs over 10000,
+# OpenHands the first and last half of 30000, SWE-agent cuts at 100000). Short results are kept
+# verbatim; only long ones lose their middle, and the cut says how much was elided.
+CAUSAL_LIMITS = {
+    # tool: (field, keep_all_up_to, head_share)
+    "read_file": ("content", 2500, 0.6),
+    "run_command": ("stdout", 1500, 0.3),
+    "edit_file": ("diff", 700, 0.7),
+}
+CAUSAL_STDERR = 600
+
+
+def elide_middle(text, limit, head_share):
+    """First and last lines that fit ``limit`` chars; says how many characters were elided."""
+    if len(text) <= limit:
+        return text, False
+    lines = text.split("\n")
+    head_room = int(limit * head_share)
+    tail_room = limit - head_room
+    head, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > head_room:
+            break
+        head.append(line)
+        used += len(line) + 1
+    tail, used = [], 0
+    for line in reversed(lines[len(head):]):
+        if used + len(line) + 1 > tail_room:
+            break
+        tail.append(line)
+        used += len(line) + 1
+    tail.reverse()
+    kept = sum(len(line) + 1 for line in head + tail)
+    if not head and not tail:
+        return text[:head_room] + f"…[{len(text) - limit} characters elided]…" + text[-tail_room:], True
+    return "\n".join(head + [f"…[{max(0, len(text) - kept)} characters elided]…"] + tail), True
+
+
+def compact_observation_causal(name, content):
+    limits = CAUSAL_LIMITS.get(name)
+    if not limits:
+        return content
+    try:
+        data = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content
+    if not isinstance(data, dict):
+        return content
+    field, limit, head_share = limits
+    changed = False
+    if isinstance(data.get(field), str):
+        data[field], changed = elide_middle(data[field], limit, head_share)
+    if name == "run_command" and isinstance(data.get("stderr"), str):
+        data["stderr"], err = elide_middle(data["stderr"], CAUSAL_STDERR, 0.3)
+        changed = changed or err
+    if not changed:
+        return content
+    if "is_truncated" in data or name in {"read_file", "edit_file"}:
+        data["is_truncated"] = True
+    return json.dumps(data, ensure_ascii=False)
+
+
+def compact_observations_causal(messages):
+    names = {}
+    for message in messages:
+        for call in (message.get("tool_calls") or []) if message.get("role") == "assistant" else []:
+            names[call.get("id")] = call.get("function", {}).get("name")
+    out = []
+    for message in messages:
+        message = dict(message)
+        if message.get("role") == "tool" and isinstance(message.get("content"), str):
+            message["content"] = compact_observation_causal(names.get(message.get("tool_call_id")), message["content"])
+        out.append(message)
+    return out
+
+
+def compact_observations(messages, policy="causal"):
+    """Shrink read_file, run_command and edit_file results; other messages are untouched."""
+    if policy == "none":
+        return messages
+    if policy == "causal":
+        return compact_observations_causal(messages)
+    if policy == "hindsight":
+        return compact_observations_hindsight(messages)
+    raise ValueError(f"Unknown observation policy: {policy}")
+
+
+EDIT_TOOLS = {"edit_file", "write_file"}
+
+
+def tool_failed(content):
+    try:
+        data = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and (data.get("status") == "error" or data.get("is_error") is True)
+
+
+def mask_unsound_steps(messages):
+    """Mark whole model responses as context-only when they should not be imitated.
+
+    A response is masked when one of its tool calls came back as an error, or when
+    it repeats an identical call although nothing was edited since the last time.
+    The steps stay in the history, so later steps can still learn to recover.
+    """
+    messages = [dict(message) for message in messages]
+    seen, bad_turns = set(), set()
+    for index, message in enumerate(messages):
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if not calls:
+            continue
+        results = messages[index + 1:index + 1 + len(calls)]
+        signature = {json.dumps(call["function"], sort_keys=True) for call in calls}
+        failed = any(result.get("role") == "tool" and tool_failed(result.get("content")) for result in results)
+        repeated = bool(signature) and signature <= seen
+        if message.get("_turn") is not None and (failed or repeated):
+            bad_turns.add(message["_turn"])
+        if any(call["function"]["name"] in EDIT_TOOLS for call in calls):
+            seen = set()
+        else:
+            seen |= signature
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("_turn") in bad_turns:
+            message["_train"] = False
+    return messages
+
+
+def clip_message(message, max_chars, *, pin=False, train=None):
+    """Copy a public message. Only tool observations are clipped.
+
+    The system prompt, the task, and assistant actions stay intact. Assistant
+    messages record ``train`` so a trajectory row can mask context-only turns.
+    """
+    source_train = message.get("_train", True)
+    message = {key: copy.deepcopy(value) for key, value in message.items() if not str(key).startswith("_")}
+    if message.get("role") == "assistant":
+        message["train"] = source_train if train is None else train
+    if not pin and message.get("role") == "tool" and isinstance(message.get("content"), str):
+        message["content"] = shorten_tool_result(message["content"], max_chars)
+    return message
+
+
+def message_groups(messages):
+    """Keep each tool call with the results that close it."""
+    groups, index = [], 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            count = len(message["tool_calls"])
+            groups.append(messages[index:index + 1 + count])
+            index += 1 + count
+        else:
+            groups.append([message])
             index += 1
-        keep = index < len(merged) and b > a and merged[index][0] <= a and b <= merged[index][1]
-        labels.append(token if keep else -100)
-    if not any(label != -100 for label in labels):
-        raise ValueError("No supervised tokens remain")
-    return {"input_ids": ids, "attention_mask": encoded["attention_mask"], "labels": labels, "text": text}
+    return groups
+
+
+def truncate_messages(messages, *, max_messages, max_chars, train=None):
+    """Keep the system prompt, the first user turn, and the newest fitting groups.
+
+    Tool-call groups are never split. Tool observations are clipped to max_chars.
+    The system prompt and the first user turn are never clipped.
+    """
+    if max_messages <= 0 or max_chars <= 0:
+        raise ValueError("max_messages and max_chars must be positive")
+    groups = message_groups(messages)
+    pinned_groups = []
+    if groups and groups[0][0].get("role") == "system":
+        pinned_groups.append(groups.pop(0))
+    user_at = next((i for i, group in enumerate(groups) if any(m.get("role") == "user" for m in group)), None)
+    if user_at is not None:
+        pinned_groups.append(groups.pop(user_at))
+    kept = list(groups)
+    while pinned_groups and sum(len(group) for group in pinned_groups + kept) > max_messages and kept:
+        kept.pop(0)
+    while sum(len(group) for group in pinned_groups + kept) > max_messages and len(pinned_groups) > 1:
+        pinned_groups.pop()
+    pinned = {id(message) for group in pinned_groups for message in group}
+    selected = [message for group in pinned_groups + kept for message in group]
+    if not selected:
+        raise ValueError("Truncation removed every message")
+    return [clip_message(message, max_chars, pin=id(message) in pinned, train=train) for message in selected]
+
+
+def trainable_assistant_indexes(messages):
+    return [index for index, message in enumerate(messages)
+            if message.get("role") == "assistant" and message.get("_train", True)]
+
+
+def response_groups(messages, indexes):
+    """Group supervised assistant indexes that belong to one model response.
+
+    A response with commentary and tool calls is stored as two adjacent assistant
+    messages with the same turn. Gemma renders them as one model turn, so they
+    must be supervised together, or the commentary would end with a stop token.
+    """
+    groups = []
+    for index in indexes:
+        turn = messages[index].get("_turn")
+        previous = groups[-1][-1] if groups else None
+        if (previous is not None and previous == index - 1 and turn is not None
+                and messages[previous].get("_turn") == turn):
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    return groups
+
+
+def build_examples(row, *, mode, task_id, segment, enable_thinking=True, max_messages=18, max_chars=4000,
+                   mask_bad_steps=True, compact=True, observation_policy="causal"):
+    """Cut one trajectory row, or one prefix row per supervised model response.
+
+    Teacher reasoning is whatever convert_task already kept. Thinking mode is
+    recorded for the trainer; this function does not render or tokenize.
+    Failed and repeated steps stay in the history but are not supervised.
+    """
+    if mode not in {"prefix", "trajectory"}:
+        raise ValueError(f"Unknown mode: {mode}")
+    messages = mask_unsound_steps(row["messages"]) if mask_bad_steps else row["messages"]
+    if compact:
+        messages = compact_observations(messages, policy=observation_policy)
+    tools = row["tools"]
+    if mode == "trajectory":
+        trained = [index for index in trainable_assistant_indexes(messages)]
+        if not trained:
+            return []
+        body = truncate_messages(messages, max_messages=max_messages, max_chars=max_chars, train=None)
+        if not any(message.get("role") == "assistant" for message in body):
+            raise ValueError("Trajectory truncation dropped every assistant turn")
+        return [{"task_id": task_id, "segment": segment, "mode": mode, "enable_thinking": enable_thinking,
+                 "tools": tools, "messages": body}]
+    examples = []
+    for group in response_groups(messages, trainable_assistant_indexes(messages)):
+        index = group[0]
+        context = truncate_messages(messages[:index], max_messages=max_messages, max_chars=max_chars, train=False)
+        steps = [clip_message(messages[i], max_chars, train=True) for i in group]
+        completion = steps[0] if len(steps) == 1 else steps
+        examples.append({"task_id": task_id, "segment": segment, "mode": mode, "turn": messages[index].get("_turn"),
+                         "enable_thinking": enable_thinking, "tools": tools,
+                         "messages": context, "completion": completion})
+    return examples
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", type=Path, help="Task folder, ancestor folder, or anthropic_exchanges.json")
     parser.add_argument("--output", required=True, type=Path, help="New output directory (never overwritten)")
-    parser.add_argument("--tokenizer", default=MODEL, help="Official tokenizer ID or local tokenizer directory")
-    parser.add_argument("--revision", default=REVISION, help="Pinned Hugging Face revision")
-    parser.add_argument("--local-files-only", action="store_true")
-    parser.add_argument("--retain-reasoning", action=argparse.BooleanOptionalAction, default=None,
-                        help="Keep available teacher reasoning (default: drop); independent of thinking mode")
-    parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=None,
-                        help="Insert Gemma's thinking-mode system token (default: off); match serving settings")
-    parser.add_argument("--thinking", action="store_true",
-                        help="Deprecated shorthand for --retain-reasoning --enable-thinking")
+    parser.add_argument("--mode", choices=["prefix", "trajectory"], required=True,
+                        help="prefix: one row per assistant message; trajectory: one row per segment")
+    parser.add_argument("--retain-reasoning", action=argparse.BooleanOptionalAction, default=False,
+                        help="Keep teacher thinking in the messages (default: drop)")
+    parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=True,
+                        help="Record that training should render Gemma thinking mode (default: on)")
     parser.add_argument("--exclude-turn", type=int, action="append", default=[],
-                        help="1-based model call to mask, retaining its context; repeatable, applies to every task")
-    parser.add_argument("--max-length", type=int, default=32768)
+                        help="1-based model call to drop as a prefix target; repeatable")
+    parser.add_argument("--max-messages", type=int, default=18,
+                        help="Keep the system prompt, first user turn, and the newest messages that fit")
+    parser.add_argument("--max-chars", type=int, default=4000,
+                        help="Clip tool observations to this many characters; the task text is kept")
     args = parser.parse_args(argv)
-    if args.thinking and (args.retain_reasoning is not None or args.enable_thinking is not None):
-        parser.error("cannot combine legacy --thinking with --[no-]retain-reasoning or --[no-]enable-thinking")
-    retain_reasoning = args.thinking if args.retain_reasoning is None else args.retain_reasoning
-    enable_thinking = args.thinking if args.enable_thinking is None else args.enable_thinking
-    if args.thinking:
-        print("warning: --thinking is deprecated; use --retain-reasoning --enable-thinking", file=sys.stderr)
     if args.output.exists():
         parser.error(f"Output already exists: {args.output}")
-    if args.max_length <= 0:
-        parser.error("--max-length must be positive")
+    if args.max_messages <= 0 or args.max_chars <= 0:
+        parser.error("--max-messages and --max-chars must be positive")
     paths = ([args.input] if args.input.is_file() and args.input.name == "anthropic_exchanges.json"
              else sorted(args.input.rglob("anthropic_exchanges.json")) if args.input.is_dir() else [])
     if not paths:
         parser.error("No anthropic_exchanges.json files found; other provider formats are not supported")
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.revision,
-                                              local_files_only=args.local_files_only)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".sft-export-", dir=args.output.parent))
     audit = []
     try:
-        with (staging / "train.jsonl").open("w") as train, (staging / "conversations.jsonl").open("w") as conv:
-            (staging / "text").mkdir()
+        with (staging / "train.jsonl").open("w") as train:
             number = 0
             for path in paths:
                 try:
                     raw = path.read_bytes()
-                    rows = convert_task(json.loads(raw), retain_reasoning=retain_reasoning, exclude_turns=args.exclude_turn)
-                    encoded_rows = [encode_example(row, tokenizer, enable_thinking=enable_thinking, max_length=args.max_length)
-                                    for row in rows]
+                    rows = convert_task(json.loads(raw), retain_reasoning=args.retain_reasoning,
+                                        exclude_turns=args.exclude_turn)
+                    examples = []
+                    for segment, row in enumerate(rows, 1):
+                        examples.extend(build_examples(
+                            row, mode=args.mode, task_id=path.parent.name, segment=segment,
+                            enable_thinking=args.enable_thinking, max_messages=args.max_messages,
+                            max_chars=args.max_chars))
                 except (ValueError, KeyError, TypeError) as error:
                     raise ValueError(f"{path}: {error}") from error
-                for segment, (row, encoded) in enumerate(zip(rows, encoded_rows), 1):
+                for example in examples:
                     number += 1
-                    text = encoded.pop("text")
-                    text_path = f"text/{number:06d}_{path.parent.name}_seg{segment}.txt"
-                    (staging / text_path).write_text(text)
-                    train.write(json.dumps(encoded, ensure_ascii=False) + "\n")
-                    # Metadata remains in the review file; train.jsonl is directly collatable.
-                    conv.write(json.dumps({"task_id": path.parent.name, "segment": segment, **row},
-                                          ensure_ascii=False) + "\n")
-                    audit.append({"row": number, "task_id": path.parent.name, "segment": segment,
-                                  "segments": len(rows), "source": str(path.resolve()),
-                                  "source_sha256": hashlib.sha256(raw).hexdigest(), "text": text_path,
-                                  "tokens": len(encoded["input_ids"]),
-                                  "supervised_tokens": sum(x != -100 for x in encoded["labels"])})
-        manifest = {"schema_version": "gemma4-sft-v2", "examples": len(audit),
-                    "tokenizer": args.tokenizer, "requested_revision": args.revision,
-                    "chat_template_sha256": TEMPLATE_SHA256,
-                    "tokenizer_backend_sha256": hashlib.sha256(tokenizer.backend_tokenizer.to_str().encode()).hexdigest(),
-                    "retain_reasoning": retain_reasoning, "enable_thinking": enable_thinking,
-                    "excluded_turns": args.exclude_turn,
-                    "max_length": args.max_length, "references": REFERENCES, "rows": audit}
+                    train.write(json.dumps(example, ensure_ascii=False) + "\n")
+                    audit.append({"row": number, "task_id": example["task_id"], "segment": example["segment"],
+                                  "mode": args.mode, "source": str(path.resolve()),
+                                  "source_sha256": hashlib.sha256(raw).hexdigest(),
+                                  "messages": len(example["messages"])})
+        manifest = {"schema_version": "gemma4-sft-v4", "mode": args.mode, "examples": len(audit),
+                    "retain_reasoning": args.retain_reasoning, "enable_thinking": args.enable_thinking,
+                    "excluded_turns": args.exclude_turn, "max_messages": args.max_messages,
+                    "max_chars": args.max_chars, "references": REFERENCES, "rows": audit}
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         staging.rename(args.output)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
-    print(f"Exported {len(audit)} example(s) to {args.output}; token counts: {[r['tokens'] for r in audit]}")
+    print(f"Exported {len(audit)} {args.mode} example(s) to {args.output}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/header.png" alt="Gemma 4 Developer Agent Competition banner" width="100%">
+  <img src="docs/assets/header.png" alt="Gemma 4 Developer Agent Competition banner" width="100%">
 </p>
 
 <h1 align="center">Kaggle Gemma Developer Agent</h1>
@@ -37,31 +37,34 @@ All agents must use `gemma-4-31b-it-qat-w4a16-ct`. Submissions include an `agent
 ## Project structure
 
 ```text
-context/                 Competition overview, data, and harness notes
+docs/context/            Competition overview, data, harness notes, and commits log
 data/
   assets/                Local snapshots, graphs, embeddings, and task wheels (gitignored)
   train/ dev/ val/        Split manifests and task lists, with symlinks to their assets
   docker/ sandbox/        Evaluation container and sandbox setup
 src/                     Agent submission: YAML, prompts, tools, skills, and adapters
-scripts/                 Split planning, wheel building, evaluation, and inference pipeline
+scripts/                 tasks/ (splits, wheels), runs/ (pipeline, eval), traces/ (viewer, Langfuse), sft_export/
 logs/remote/
   base/<split>/<task_id>/          Baseline artifacts; train includes failure analysis.md
   <collaborator>/itr-<n>/<split>/<task_id>/  Per-task experiment artifacts
 notebooks/                Kaggle inference notebook
-presentation/             Project presentation source
+training/                 LoRA SFT trainer and its tests
+viewer/                   GitHub Pages trace viewer, presentation, and eval_ui reports
+server/                   vLLM serving (RunPod, local tunnel)
+docs/                     Reports, assets, and reading resources
 ```
 
 The trace viewer catalog is generated from directory structure, not a manually
 maintained task list. After adding traces anywhere below `logs/remote/` using
-the layout above, run `python3 scripts/build_trace_index.py`. The viewer's
+the layout above, run `python3 scripts/traces/build_trace_index.py`. The viewer's
 **Trace directory** control then lets you switch between every discovered
 directory (for example, `base`, `akshay/itr-1`, or `rishav/itr-1`).
 
-The split folders reference shared files in `data/assets/`, which are local downloads and are not committed. Run `scripts/plan_observed_task_splits.py --materialize` after restoring the Kaggle data to rebuild those references.
+The split folders reference shared files in `data/assets/`, which are local downloads and are not committed. Run `scripts/tasks/plan_observed_task_splits.py --materialize` after restoring the Kaggle data to rebuild those references.
 
 ## Data
 
-The competition provides a public training/development set for agent training, prompt design, and local validation. During scoring, it is replaced by a hidden test set. Both sets use the same graph-generation methods and verification standards. See the [dataset description](context/data.md) for the full schema.
+The competition provides a public training/development set for agent training, prompt design, and local validation. During scoring, it is replaced by a hidden test set. Both sets use the same graph-generation methods and verification standards. See the [dataset description](docs/context/data.md) for the full schema.
 
 ### Training data
 
@@ -82,7 +85,7 @@ The hidden test set has **about 120 tasks from private repositories**, split bet
 
 ## Harness
 
-The competition harness compiles the YAML submission, provides repository tools to the agent, and verifies its patch in a fresh sandbox. The diagram below is reproduced from the [competition harness guide](context/harness.md).
+The competition harness compiles the YAML submission, provides repository tools to the agent, and verifies its patch in a fresh sandbox. The diagram below is reproduced from the [competition harness guide](docs/context/harness.md).
 
 ```mermaid
 flowchart TB
@@ -133,7 +136,7 @@ ContB -->|"exit_code == 0 & JUnit XML valid"| Score["Resolution Rate [0.0, 1.0]"
 
 The submission configures the `repo-navigation` skill. Its instructions are available through the harness skill tools.
 
-![Competition tool usage diagram](assets/tool.usage.png)
+![Competition tool usage diagram](docs/assets/tool.usage.png)
 
 ## How to run
 
@@ -188,8 +191,8 @@ The amd64 image matches the supplied Linux wheels. On Apple Silicon, Docker uses
 Keep physical assets in one place under `data/assets/`: snapshots, graphs, embeddings, and task-specific wheel caches. Split folders contain task metadata and symlinks to only the assets their tasks use. Wheel caches are keyed by task ID, so changing split assignments does not require rebuilding them.
 
 ```bash
-python3 scripts/plan_observed_task_splits.py --materialize
-bash scripts/shell/build_split_wheels.sh
+python3 scripts/tasks/plan_observed_task_splits.py --materialize
+bash scripts/tasks/build_split_wheels.sh
 ```
 
 The planner accepts the organizer's `graphs/` folder or the older root-level asset folders and consolidates their files under `data/assets/`. Wheel caches are stored in `data/assets/task_wheels/<task_id>/`; the builder replaces each cache from scratch using the task's declared dependencies.
@@ -199,13 +202,13 @@ Task wheels target **Python 3.13 on Linux amd64**, matching the sandbox; the hos
 ```bash
 docker run --platform linux/amd64 --rm \
   -v "$PWD:/workspace" -w /workspace \
-  python:3.13-slim python scripts/repair_task_wheels.py
+  python:3.13-slim python scripts/tasks/repair_task_wheels.py
 ```
 
 After repair, verify a saved agent patch without calling the model again:
 
 ```bash
-.venv/bin/python scripts/evaluate.py --task-id fastapi_14786 \
+.venv/bin/python scripts/runs/evaluate.py --task-id fastapi_14786 \
   --patch-file logs/remote/base/train/fastapi_14786/results/fastapi_14786.patch
 ```
 
@@ -216,7 +219,7 @@ The standalone evaluator saves reverification results at `logs/remote/<split>/<t
 This runs without a model and confirms the local evaluation setup:
 
 ```bash
-.venv/bin/python scripts/evaluate.py --reference-check
+.venv/bin/python scripts/runs/evaluate.py --reference-check
 ```
 
 ### Run the local evaluation pipeline
@@ -224,7 +227,7 @@ This runs without a model and confirms the local evaluation setup:
 The local inference server must expose the competition model and support automatic tool calling. Start it, then set the endpoint and run:
 
 ```bash
-LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/evaluate.py
+LOCAL_INFERENCE_URL=http://localhost:8000/v1 .venv/bin/python scripts/runs/evaluate.py
 ```
 
 This runner uses `fastapi_11194`, allows 50 tool calls and 30 minutes, and writes under `logs/remote/val/fastapi_11194/checks/baseline/`. Reference patches are used only with `--reference-check`.
@@ -245,7 +248,7 @@ GEMINI_API_KEY=your-gemini-key
 Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --val --task-id fastapi_11194 \
+.venv/bin/python scripts/runs/task_pipeline.py --val --task-id fastapi_11194 \
   --submission src/rishav/itr-1 \
   --api-base https://your-model-server/v1 --model gemma4
 ```
@@ -253,13 +256,13 @@ Run the base-model pipeline (or pass `--api-base` for a different endpoint):
 Examples for hosted models:
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --train --task-id fastapi_11355 \
+.venv/bin/python scripts/runs/task_pipeline.py --train --task-id fastapi_11355 \
   --submission src/rishav/itr-1 --provider openai --model gpt-4.1
 
-.venv/bin/python scripts/task_pipeline.py --train --task-id fastapi_11355 \
+.venv/bin/python scripts/runs/task_pipeline.py --train --task-id fastapi_11355 \
   --submission src/rishav/itr-1 --provider anthropic --model claude-sonnet-4-5
 
-.venv/bin/python scripts/task_pipeline.py --train --task-id fastapi_11355 \
+.venv/bin/python scripts/runs/task_pipeline.py --train --task-id fastapi_11355 \
   --submission src/rishav/itr-1 --provider gemini --model gemini-2.5-pro
 ```
 
@@ -268,26 +271,57 @@ Choose a split with `--train`, `--dev`, or `--val` (or `--split train`, `--split
 Run an entire split or select several task IDs; comma-separated IDs also work:
 
 ```bash
-.venv/bin/python scripts/task_pipeline.py --train --all --submission src/rishav/itr-1
-.venv/bin/python scripts/task_pipeline.py --dev --all --submission src/rishav/itr-1
-.venv/bin/python scripts/task_pipeline.py --dev --task-ids <task-id-1> <task-id-2> --submission src/akshay/itr-1
-.venv/bin/python scripts/task_pipeline.py --val --task-ids <task-id-1>,<task-id-2> --submission src/sanyam/itr-1
+.venv/bin/python scripts/runs/task_pipeline.py --train --all --submission src/rishav/itr-1
+.venv/bin/python scripts/runs/task_pipeline.py --dev --all --submission src/rishav/itr-1
+.venv/bin/python scripts/runs/task_pipeline.py --dev --task-ids <task-id-1> <task-id-2> --submission src/akshay/itr-1
+.venv/bin/python scripts/runs/task_pipeline.py --val --task-ids <task-id-1>,<task-id-2> --submission src/sanyam/itr-1
 ```
 
 Defaults allow 25 tool calls, 10 minutes, and 4096 output tokens. For other tasks, provide matching task, snapshot, graph, embedding, and wheel paths.
+
+### Three-attempt Haiku and Luna runs
+
+Run the same balanced 20 validation tasks using `src/rishav/inspiration-one`:
+
+```bash
+bash scripts/runs/run_haiku20.sh
+bash scripts/runs/run_luna20.sh
+```
+
+Run one model command at a time. `--parallel N` controls the number of new,
+independent `task_pipeline.py` processes per task, then the runner moves to the next task.
+The Haiku script defaults to two new attempts plus its existing single run via
+`--baseline-run haiku-5p5-inspiration-one-20-20261017`. The existing run is read only
+and must have valid results for all selected tasks before starting. Luna defaults
+to three fresh attempts. For example, `bash scripts/runs/run_luna20.sh --parallel 2`
+runs two new attempts per task (pass@2 unless a baseline is also supplied). Submission
+evaluation limits and token settings are inherited without command-line overrides;
+the existing Haiku API compatibility conversion still applies. Luna uses
+`OPENAI_API_KEY_NEW` when set, otherwise `OPENAI_API_KEY`.
+
+Every new attempt has its own run directory ending in `-attempt-N`, including
+its patches, results, agent traces and model traces.
+The parent run directory contains per-attempt console logs and `summary.json`.
+Pass@k counts a task as solved when at least one of its k attempts passes. Errors and missing
+results are reported separately from test failures, and mark the summary incomplete.
+Haiku runs 40 new attempts; Luna runs 60 by default. Langfuse uploads are disabled for these scripts.
+
+Use `--resume` to skip recorded passes/failures and retry errors or missing results.
+Use a different `--run-name NAME` for a fresh experiment; existing runs are protected
+against accidental replacement. Do not run two resumptions of the same run together.
 
 ### Browse model traces
 
 Run the local trace viewer and open `http://127.0.0.1:8765/` to inspect model turns, tool calls, and results:
 
 ```bash
-.venv/bin/python scripts/trace_viewer.py
+.venv/bin/python scripts/traces/trace_viewer.py
 ```
 
-The GitHub Pages UI reads the committed `trace-index.json`. Regenerate it after adding train traces:
+The GitHub Pages UI reads the committed `viewer/trace-index.json`. Regenerate it after adding train traces:
 
 ```bash
-.venv/bin/python scripts/trace_viewer.py --write-index
+.venv/bin/python scripts/traces/trace_viewer.py --write-index
 ```
 
 The static index includes train traces only by default, matching the artifacts committed under `logs/remote/base/train/`.
@@ -303,7 +337,7 @@ cited template/training references.
 From the repository root, push and monitor the offline competition notebook:
 
 ```bash
-python3 scripts/run_kaggle_notebook.py
+python3 scripts/runs/run_kaggle_notebook.py
 ```
 
 When the Langfuse settings are configured, the command performs the full chain:
@@ -317,14 +351,14 @@ When the Langfuse settings are configured, the command performs the full chain:
 To follow and import the latest existing run without launching another version:
 
 ```bash
-python3 scripts/run_kaggle_notebook.py --follow-only
+python3 scripts/runs/run_kaggle_notebook.py --follow-only
 ```
 
 Use `--skip-langfuse` to stop after monitoring, or `--langfuse-session-id ID` to override the generated session ID. Kaggle CLI downloads the latest run for the notebook handle. To import an already downloaded historical version, use its artifact directory directly:
 
 ```bash
 uv run --with 'langfuse>=4,<5' --python 3.12 \
-  python scripts/stitch_langfuse_trace.py \
+  python scripts/traces/stitch_langfuse_trace.py \
   --artifact-dir /tmp/kaggle-run-output-353660769
 ```
 
@@ -332,7 +366,7 @@ You can also download and import the latest Kaggle output without launching or f
 
 ```bash
 uv run --with 'langfuse>=4,<5' --python 3.12 \
-  python scripts/stitch_langfuse_trace.py \
+  python scripts/traces/stitch_langfuse_trace.py \
   --kaggle-kernel your-kaggle-name/gemma-agent-run
 ```
 
@@ -345,14 +379,15 @@ The automatic download covers the completed notebook's output artifacts and log.
 ```text
 ├── src/                    Agent configuration, prompts, and tool reference code
 ├── scripts/
-│   ├── task_pipeline.py    Remote base-model task runner
-│   ├── evaluate.py         Evaluation and reference checks
-│   ├── trace_viewer.py     Local server and static trace-index generator
-│   ├── run_kaggle_notebook.py  Push, follow, download, and import a Kaggle run
-│   ├── langfuse_bridge.py   Shared automatic post-run upload hook
-│   └── stitch_langfuse_trace.py  Validate and import local/Kaggle ATIF artifacts
+│   ├── tasks/              Split planning, dependency collection, wheel building and repair
+│   ├── runs/               Task pipeline, pass@3 and batch runners, evaluation, Kaggle notebook runs
+│   ├── traces/             vLLM trace proxy, trace builder and viewer, Langfuse upload and stitching
+│   ├── sft_export/         SFT dataset export and thought rationalization
+│   └── tests/              Script tests
 ├── notebooks/              Kaggle notebook and account-specific metadata
-├── context/                Competition and harness notes
+├── training/               LoRA SFT trainer, tests, and offline wheels (ignored)
+├── viewer/                 GitHub Pages trace viewer, presentation, and eval_ui reports
+├── docs/                   context/ (competition notes, commits log), reports, assets, resources
 ├── requirements.lock.txt   Python dependencies
 ├── data/                   Local task assets (ignored)
 ├── wheelhouse/             Organizer wheels (ignored)
@@ -360,5 +395,5 @@ The automatic download covers the completed notebook's output artifacts and log.
     ├── base/               Original train, dev, and val artifacts
     │   └── train/failure analysis.md
     └── <collaborator>/itr-<n>/  Pipeline artifacts for each experiment
-└── trace-index.json        GitHub Pages trace catalogue (train only)
+└── viewer/trace-index.json GitHub Pages trace catalogue (train only)
 ```

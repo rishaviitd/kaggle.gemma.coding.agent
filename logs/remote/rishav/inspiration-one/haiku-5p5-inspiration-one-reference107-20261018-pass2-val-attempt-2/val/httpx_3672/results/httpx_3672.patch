@@ -1,0 +1,131 @@
+diff --git a/src/ahttpx/_parsers.py b/src/ahttpx/_parsers.py
+index 8a52a56..3d890b3 100644
+--- a/src/ahttpx/_parsers.py
++++ b/src/ahttpx/_parsers.py
+@@ -80,7 +80,7 @@ class HTTPParser:
+     client.recv_status_line()
+     client.recv_headers()
+     client.recv_body()
+-    client.complete()
++    client.reset()
+     client.close()
+     """
+     def __init__(self, stream: Stream, mode: str) -> None:
+@@ -375,7 +375,7 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    async def complete(self):
++    async def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+         is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+diff --git a/src/ahttpx/_pool.py b/src/ahttpx/_pool.py
+index f712cfa..4303f98 100644
+--- a/src/ahttpx/_pool.py
++++ b/src/ahttpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     async def _complete(self) -> None:
+-        await self._parser.complete()
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     async def _close(self) -> None:
+diff --git a/src/ahttpx/_server.py b/src/ahttpx/_server.py
+index a9103cc..5b7cb6b 100644
+--- a/src/ahttpx/_server.py
++++ b/src/ahttpx/_server.py
+@@ -89,7 +89,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     async def _complete(self):
+-        await self._parser.complete
++        await self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+diff --git a/src/httpx/_parsers.py b/src/httpx/_parsers.py
+index 830fccd..8da5bb6 100644
+--- a/src/httpx/_parsers.py
++++ b/src/httpx/_parsers.py
+@@ -80,7 +80,7 @@ class HTTPParser:
+     client.recv_status_line()
+     client.recv_headers()
+     client.recv_body()
+-    client.complete()
++    client.reset()
+     client.close()
+     """
+     def __init__(self, stream: Stream, mode: str) -> None:
+@@ -375,11 +375,14 @@ class HTTPParser:
+             self.recv_state = State.DONE
+         return body
+ 
+-    def complete(self):
++    @property
++    def keep_alive(self) -> bool:
++        return self.send_keep_alive and self.recv_keep_alive
++
++    def reset(self):
+         is_fully_complete = self.send_state == State.DONE and self.recv_state == State.DONE
+-        is_keepalive = self.send_keep_alive and self.recv_keep_alive
+ 
+-        if not (is_fully_complete and is_keepalive):
++        if not (is_fully_complete and self.keep_alive):
+             self.close()
+             return
+ 
+diff --git a/src/httpx/_pool.py b/src/httpx/_pool.py
+index 7193f8d..64f4fe0 100644
+--- a/src/httpx/_pool.py
++++ b/src/httpx/_pool.py
+@@ -237,7 +237,7 @@ class Connection(Transport):
+ 
+     # Request/response cycle complete...
+     def _complete(self) -> None:
+-        self._parser.complete()
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+     def _close(self) -> None:
+diff --git a/src/httpx/_server.py b/src/httpx/_server.py
+index 95226d9..52bf94d 100644
+--- a/src/httpx/_server.py
++++ b/src/httpx/_server.py
+@@ -49,8 +49,14 @@ class HTTPConnection:
+                     else:
+                         self._send_head(response)
+                         self._send_body(response)
++                    # Always read the request to completion on keep-alives.
++                    if self._parser.keep_alive:
++                        while self._recv_body():
++                            pass
+         except Exception:
+             logger.error("Internal Server Error", exc_info=True)
++        finally:
++            self.close()
+ 
+     def close(self):
+         self._parser.close()
+@@ -89,7 +95,7 @@ class HTTPConnection:
+ 
+     # Start it all over again...
+     def _complete(self):
+-        self._parser.complete
++        self._parser.reset()
+         self._idle_expiry = time.monotonic() + self._keepalive_duration
+ 
+ 
+@@ -122,5 +128,8 @@ def serve_http(endpoint):
+ 
+ 
+ def run(app):
+-    with serve_http(app) as server:
+-        server.wait()
++    try:
++        with serve_http(app) as server:
++            server.wait()
++    except KeyboardInterrupt:
++        pass

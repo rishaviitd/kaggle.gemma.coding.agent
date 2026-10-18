@@ -1,0 +1,158 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index 418c1172..5a8d9844 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -30,6 +30,7 @@ class Dependant:
+     security_scopes_param_name: Optional[str] = None
+     security_scopes: Optional[List[str]] = None
+     use_cache: bool = True
++    scope: Optional[str] = None
+     path: Optional[str] = None
+     cache_key: Tuple[Optional[Callable[..., Any]], Tuple[str, ...]] = field(init=False)
+ 
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 6477a2cb..06dfc602 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -237,6 +237,7 @@ def get_dependant(
+     name: Optional[str] = None,
+     security_scopes: Optional[List[str]] = None,
+     use_cache: bool = True,
++    scope: Optional[str] = None,
+ ) -> Dependant:
+     dependant = Dependant(
+         call=call,
+@@ -244,6 +245,7 @@ def get_dependant(
+         path=path,
+         security_scopes=security_scopes,
+         use_cache=use_cache,
++        scope=scope,
+     )
+     path_param_names = get_path_param_names(path)
+     endpoint_signature = get_typed_signature(call)
+@@ -276,6 +278,7 @@ def get_dependant(
+                 name=param_name,
+                 security_scopes=use_security_scopes,
+                 use_cache=param_details.depends.use_cache,
++                scope=param_details.depends.scope,
+             )
+             dependant.dependencies.append(sub_dependant)
+             continue
+@@ -574,6 +577,18 @@ class SolvedDependency:
+     dependency_cache: Dict[Tuple[Callable[..., Any], Tuple[str]], Any]
+ 
+ 
++def _get_dependency_exit_stack(
++    request: Union[Request, WebSocket],
++    scope: Optional[str],
++    default: AsyncExitStack,
++) -> AsyncExitStack:
++    if scope == "function":
++        function_stack = request.scope.get("fastapi_function_astack")
++        if isinstance(function_stack, AsyncExitStack):
++            return function_stack
++    return default
++
++
+ async def solve_dependencies(
+     *,
+     request: Union[Request, WebSocket],
+@@ -637,7 +652,11 @@ async def solve_dependencies(
+             solved = dependency_cache[sub_dependant.cache_key]
+         elif is_gen_callable(call) or is_async_gen_callable(call):
+             solved = await solve_generator(
+-                call=call, stack=async_exit_stack, sub_values=solved_result.values
++                call=call,
++                stack=_get_dependency_exit_stack(
++                    request, sub_dependant.scope, async_exit_stack
++                ),
++                sub_values=solved_result.values,
+             )
+         elif is_coroutine_callable(call):
+             solved = await call(**solved_result.values)
+diff --git a/fastapi/param_functions.py b/fastapi/param_functions.py
+index f88937e2..697a635e 100644
+--- a/fastapi/param_functions.py
++++ b/fastapi/param_functions.py
+@@ -1,4 +1,4 @@
+-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
++from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+ 
+ from annotated_doc import Doc
+ from fastapi import params
+@@ -2245,6 +2245,18 @@ def Depends(  # noqa: N802
+             """
+         ),
+     ] = True,
++    scope: Annotated[
++        Optional[Literal["function", "request"]],
++        Doc(
++            """
++            Control when the exit code of a dependency with `yield` runs.
++
++            `"function"`: exit after the path operation function returns, before
++            the response is sent. `"request"` (default): exit after the response
++            is sent.
++            """
++        ),
++    ] = None,
+ ) -> Any:
+     """
+     Declare a FastAPI dependency.
+@@ -2275,7 +2287,7 @@ def Depends(  # noqa: N802
+         return commons
+     ```
+     """
+-    return params.Depends(dependency=dependency, use_cache=use_cache)
++    return params.Depends(dependency=dependency, use_cache=use_cache, scope=scope)
+ 
+ 
+ def Security(  # noqa: N802
+diff --git a/fastapi/params.py b/fastapi/params.py
+index 2dc04be1..78138114 100644
+--- a/fastapi/params.py
++++ b/fastapi/params.py
+@@ -1,7 +1,7 @@
+ import warnings
+ from dataclasses import dataclass
+ from enum import Enum
+-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
++from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+ 
+ from fastapi.openapi.models import Example
+ from pydantic.fields import FieldInfo
+@@ -766,6 +766,7 @@ class File(Form):  # type: ignore[misc]
+ class Depends:
+     dependency: Optional[Callable[..., Any]] = None
+     use_cache: bool = True
++    scope: Optional[str] = None
+ 
+ 
+ @dataclass
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index 0b59d250..c15799d5 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -316,7 +316,7 @@ def get_request_handler(
+     else:
+         actual_response_class = response_class
+ 
+-    async def app(request: Request) -> Response:
++    async def app_handler(request: Request) -> Response:
+         response: Union[Response, None] = None
+         file_stack = request.scope.get("fastapi_middleware_astack")
+         assert isinstance(file_stack, AsyncExitStack), (
+@@ -434,6 +434,13 @@ def get_request_handler(
+         assert response
+         return response
+ 
++    async def app(request: Request) -> Response:
++        # Dependencies with scope="function" are closed here, after the path
++        # operation function returns but before the response is sent
++        async with AsyncExitStack() as function_stack:
++            request.scope["fastapi_function_astack"] = function_stack
++            return await app_handler(request)
++
+     return app
+ 
+ 

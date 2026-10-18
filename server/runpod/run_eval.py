@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "scripts/task_pipeline.py").is_file())
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / "scripts/runs/task_pipeline.py").is_file())
 DEFAULT_TASKS = """
 fastapi_12942 fastapi_14372 fastapi_14794 fastapi_5624 fastapi_14077
 fastapi_14266 fastapi_14246 fastapi_14482 fastapi_14419 fastapi_14306
@@ -45,7 +45,7 @@ def main():
         log = log_dir / f"worker-{index + 1}.log"
         file = log.open("a")
         cmd = [
-            sys.executable, "-u", str(ROOT / "scripts/task_pipeline.py"),
+            sys.executable, "-u", str(ROOT / "scripts/runs/task_pipeline.py"),
             "--val", "--task-ids", *chunk,
             "--submission", SUBMISSION,
             "--run-name", RUN_NAME,
