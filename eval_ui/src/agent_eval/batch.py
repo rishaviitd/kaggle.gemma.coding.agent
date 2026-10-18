@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 import pandas as pd
 from .metrics.outcomes import outcome_summary
+from .metrics.behavior import compute_behavior
 
 
 @dataclass
@@ -22,6 +23,9 @@ class BatchReportData:
     gold_metrics: pd.DataFrame
     pairing: pd.DataFrame
     modules: pd.DataFrame
+    behavior_summary: pd.DataFrame
+    behavior_tasks: pd.DataFrame
+    behavior_events: pd.DataFrame
 
 
 def _number(value):
@@ -42,6 +46,7 @@ def _ranked_outcome(value):
 def summarize_batch(experiment, metrics, findings):
     """Return deterministic report tables. Rates always include coverage/denominators."""
     e, m, f = experiment, metrics, findings
+    behavior = compute_behavior(e)
     runs = e.runs.sort_values(['repo', 'task_id', 'attempt_id', 'run_id']).copy()
     lookup = {(row.run_id, row.metric_id): row for row in m.metrics.itertuples()}
     def metric(rid, mid):
@@ -177,4 +182,4 @@ def summarize_batch(experiment, metrics, findings):
                     top_tasks=tasks.nlargest(10,'submit_attempts')[['run_id','task_id','repo','outcome','submit_attempts','budgeted_tool_calls','duration_seconds']].to_dict('records') if total else [],
                     note='These are raw attempted submit_patch calls. Repeated calls may occur after an accepted submission; they are not budget-counted calls or distinct patches.')
     gold_metrics=m.metrics[m.metrics.metric_id.isin(['C04','C05'])][['run_id','metric_id','value','availability','unavailable_reason','denominator','evidence_ids']].copy()
-    return BatchReportData(overview,repository_frame,workflow,budget,tools,primary_stages,finding_prevalence,cost,tasks,quality,submission,gold_metrics,m.pairing.copy(),m.modules.copy())
+    return BatchReportData(overview,repository_frame,workflow,budget,tools,primary_stages,finding_prevalence,cost,tasks,quality,submission,gold_metrics,m.pairing.copy(),m.modules.copy(),behavior.summary,behavior.tasks,behavior.events)

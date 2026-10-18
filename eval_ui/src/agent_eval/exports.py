@@ -31,7 +31,7 @@ def export_report(e,m,f,output_dir,html=True,parquet=False):
             except ImportError as exc:raise RuntimeError('Optional parquet export requires pyarrow or fastparquet') from exc
     from .batch import summarize_batch
     batch=summarize_batch(e,m,f)
-    batch_tables={'batch_repositories':batch.repositories,'batch_workflow':batch.workflow,'batch_budget':batch.budget,'batch_tools':batch.tool_reliability,'batch_stages':batch.primary_stages,'batch_findings':batch.finding_prevalence,'batch_cost':batch.cost,'batch_tasks':batch.tasks,'batch_quality':batch.quality,'batch_gold_metrics':batch.gold_metrics,'batch_pairing':batch.pairing}
+    batch_tables={'batch_repositories':batch.repositories,'batch_workflow':batch.workflow,'batch_budget':batch.budget,'batch_tools':batch.tool_reliability,'batch_stages':batch.primary_stages,'batch_findings':batch.finding_prevalence,'batch_cost':batch.cost,'batch_tasks':batch.tasks,'batch_quality':batch.quality,'batch_gold_metrics':batch.gold_metrics,'batch_pairing':batch.pairing,'batch_behavior_summary':batch.behavior_summary,'batch_behavior_tasks':batch.behavior_tasks,'batch_behavior_events':batch.behavior_events}
     for name,frame in batch_tables.items():
         flat=frame.copy()
         for col in flat.columns:

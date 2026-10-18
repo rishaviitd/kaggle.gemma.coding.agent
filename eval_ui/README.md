@@ -5,7 +5,7 @@ An offline-by-default notebook and reusable Python engine for completed coding-a
 ## Open the results
 
 - `reports/itr-1/report.html`: self-contained **single-attempt explorer**. Select a task to see only its timeline, tool calls/results, tests, patch, tokens, findings, and source evidence.
-- `reports/itr-1/batch_report.html`: self-contained **whole-batch report**. It shows official resolution, repository breakdown, implementation/verification coverage, budget stages, submission loops, tool outcomes, cost, findings, quality flags, and a linked task index. Click a task to open the detailed explorer.
+- `reports/itr-1/batch_report.html`: self-contained **whole-batch report**. It shows official resolution, repository breakdown, implementation/verification coverage, deterministic behavior diagnostics, budget stages, submission loops, tool outcomes, cost, findings, quality flags, and a linked task index. Click a task to open the detailed explorer.
 - `notebooks/01_agent_trace_report.ipynb`: run **one notebook** to render both views and regenerate both HTML files plus CSV/JSONL exports. The executed copy is `notebooks/01_agent_trace_report.executed.ipynb`.
 - `reports/itr-1/summary.json` and `batch_summary.json`: outcome counts, coverage, Wilson interval, submission summary, source hashes and method version.
 
@@ -126,7 +126,7 @@ Advanced modules report their prerequisites in `modules.csv`. Patch scope, recor
 
 ## Exports and reproducibility
 
-Every normalized table, metrics, findings, primary stages, gold overlap, pairing, module availability, and batch rollup table is exported to CSV and JSONL. Git tracks the two HTML reports, summaries, and compact batch CSVs; running the notebook recreates the larger detailed exports. Structured cells are JSON in CSV. Parquet is optional with `pyarrow`. `manifest.json` hashes exported artifacts. Discovery is recursive only within the supplied root and excludes reports, caches, virtual environments, Git metadata and node_modules. Per-file failures are isolated; duplicate task IDs remain separate attempts, including identical traces at different paths. Output directories containing source files are rejected.
+Every normalized table, metrics, findings, primary stages, gold overlap, pairing, module availability, behavior diagnostics, and batch rollup table is exported to CSV and JSONL. Git tracks the two HTML reports, summaries, and compact batch CSVs; running the notebook recreates the larger detailed exports. Structured cells are JSON in CSV. Parquet is optional with `pyarrow`. `manifest.json` hashes exported artifacts. Discovery is recursive only within the supplied root and excludes reports, caches, virtual environments, Git metadata and node_modules. Per-file failures are isolated; duplicate task IDs remain separate attempts, including identical traces at different paths. Output directories containing source files are rejected.
 
 The golden fixture is an exact local copy of `fastapi_5624/model_trace.json` with SHA-256 `df6d664f4c923c3ebad2775159b44674c98b2918c7b3368f1c8961462868c9e9`. Its tests verify 30 turns / 28 attempts / 27 results / 25 budgeted calls / 29 reported model calls, turn-10 missing result, turn-11 compaction, the 40-vs-25 budget conflict, per-turn completion usage, patch capture, and external-verifier separation. Synthetic mixed-batch tests cover malformed files, missing fields, duplicates, raw/parsed conflicts, multiple calls per turn, pipeline ambiguity and optional enrichments.
 

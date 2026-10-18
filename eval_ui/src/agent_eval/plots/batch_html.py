@@ -12,7 +12,7 @@ def write_batch_html(batch, path, findings=None, reviews=None):
     finding_runs={}
     if findings is not None and len(findings.findings):
         finding_runs={category:sorted(set(group.run_id)) for category,group in findings.findings.groupby('category')}
-    data=dict(overview=batch.overview,repositories=records(batch.repositories),workflow=records(batch.workflow),budget=records(batch.budget),tools=records(batch.tool_reliability),stages=records(batch.primary_stages),findings=records(batch.finding_prevalence),finding_runs=finding_runs,cost=records(batch.cost),tasks=records(batch.tasks),quality=records(batch.quality),submission=batch.submission,gold_metrics=records(batch.gold_metrics),pairing=records(batch.pairing),modules=records(batch.modules),figures=figures)
+    data=dict(overview=batch.overview,repositories=records(batch.repositories),workflow=records(batch.workflow),budget=records(batch.budget),tools=records(batch.tool_reliability),stages=records(batch.primary_stages),findings=records(batch.finding_prevalence),finding_runs=finding_runs,cost=records(batch.cost),tasks=records(batch.tasks),quality=records(batch.quality),submission=batch.submission,gold_metrics=records(batch.gold_metrics),pairing=records(batch.pairing),modules=records(batch.modules),behavior_summary=records(batch.behavior_summary),behavior_tasks=records(batch.behavior_tasks),behavior_events=records(batch.behavior_events),figures=figures)
     if reviews is not None and not reviews.empty:
         data['llm_reviews']=records(reviews)
         if findings is not None:
