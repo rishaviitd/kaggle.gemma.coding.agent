@@ -121,3 +121,6 @@
 
 ## codebase — 2026-10-19 (context/ moved to docs/context/)
 - `context/` → `docs/context/` (commits.md, data.md, harness.md, overview.md, split-program.md, tool_description.md, simplified_code_search). Updated README links and trees, `viewer/presentation/slides/what-not-to-do.js`, `src/base/analysis/edit_file_tool_analysis.md`. No code reads these files.
+
+## codebase — 2026-10-19 (merged origin/main)
+- Merged 5 remote commits (Haiku SFT conversation dataset, resolved-only export, eval UI behavior diagnostics, Gemma 4 E4B QLoRA run20 traces). `export_sft.py`: kept the local prefix/trajectory exporter and added the remote `--conversations-only` mode (`--minimal`, `--resolved-only`, `--skip-invalid`, `--source-commit`, multiple inputs) as `export_conversations`; exactly one of `--mode` / `--conversations-only` is required. README keeps the local text plus a Conversations-only section. Remote `eval_ui` files placed under `viewer/eval_ui/`; trace index entry landed in `viewer/trace-index.json`. 31 exporter tests (incl. the 2 remote ones), 7 script, 19 trainer tests pass.

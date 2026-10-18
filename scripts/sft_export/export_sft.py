@@ -754,11 +754,77 @@ def build_examples(row, *, mode, task_id, segment, enable_thinking=True, max_mes
     return examples
 
 
+def export_conversations(args, paths):
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".sft-export-", dir=args.output.parent))
+    written = rejected = filtered_unresolved = 0
+    try:
+        with (staging / "train.jsonl").open("w") as train:
+            reject_file = (staging / "rejected.jsonl").open("w") if args.skip_invalid else None
+            try:
+                for path in paths:
+                    raw = path.read_bytes()
+                    try:
+                        if args.resolved_only:
+                            result_path = path.parent / "results" / f"{path.parent.name}.json"
+                            result = json.loads(result_path.read_bytes())
+                            if result.get("resolved") is False:
+                                filtered_unresolved += 1
+                                continue
+                            if result.get("resolved") is not True:
+                                raise ValueError(f"Missing boolean resolved status in {result_path}")
+                        rows = convert_task(json.loads(raw), retain_reasoning=args.retain_reasoning,
+                                            exclude_turns=args.exclude_turn)
+                    except (ValueError, KeyError, TypeError, OSError) as error:
+                        if not args.skip_invalid:
+                            raise ValueError(f"{path}: {error}") from error
+                        rejected += 1
+                        reject_file.write(json.dumps({
+                            "task_id": path.parent.name,
+                            "source": str(path),
+                            "source_commit": args.source_commit,
+                            "source_sha256": hashlib.sha256(raw).hexdigest(),
+                            "error": str(error),
+                        }, ensure_ascii=False) + "\n")
+                        continue
+                    for segment, row in enumerate(rows, 1):
+                        written += 1
+                        exported = row if args.minimal else {
+                            "task_id": path.parent.name,
+                            "segment": segment,
+                            "source": str(path),
+                            "source_commit": args.source_commit,
+                            "source_sha256": hashlib.sha256(raw).hexdigest(),
+                            "template_model": MODEL,
+                            "template_revision": REVISION,
+                            "template_kwargs": {
+                                "enable_thinking": args.enable_thinking,
+                                "preserve_thinking": any(
+                                    message.get("reasoning") for message in row["messages"]
+                                ),
+                            },
+                            **row,
+                        }
+                        train.write(json.dumps(exported, ensure_ascii=False) + "\n")
+            finally:
+                if reject_file is not None:
+                    reject_file.close()
+        if written == 0:
+            raise ValueError("No valid examples found")
+        staging.rename(args.output)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    print(f"Exported {written} conversation example(s) to {args.output}; "
+          f"rejected: {rejected}; filtered unresolved: {filtered_unresolved}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("input", type=Path, help="Task folder, ancestor folder, or anthropic_exchanges.json")
+    parser.add_argument("input", nargs="+", type=Path,
+                        help="One or more task folders, ancestors, or anthropic_exchanges.json files")
     parser.add_argument("--output", required=True, type=Path, help="New output directory (never overwritten)")
-    parser.add_argument("--mode", choices=["prefix", "trajectory"], required=True,
+    parser.add_argument("--mode", choices=["prefix", "trajectory"],
                         help="prefix: one row per assistant message; trajectory: one row per segment")
     parser.add_argument("--retain-reasoning", action=argparse.BooleanOptionalAction, default=False,
                         help="Keep teacher thinking in the messages (default: drop)")
@@ -770,15 +836,43 @@ def main(argv=None):
                         help="Keep the system prompt, first user turn, and the newest messages that fit")
     parser.add_argument("--max-chars", type=int, default=4000,
                         help="Clip tool observations to this many characters; the task text is kept")
+    parser.add_argument("--conversations-only", action="store_true",
+                        help="Write normalized messages/tools JSONL, one row per segment, instead of --mode rows")
+    parser.add_argument("--skip-invalid", action="store_true",
+                        help="With --conversations-only, audit invalid trajectories instead of aborting")
+    parser.add_argument("--source-commit",
+                        help="Git commit containing the inputs (recorded in conversations-only rows)")
+    parser.add_argument("--minimal", action="store_true",
+                        help="With --conversations-only, write only messages and tools")
+    parser.add_argument("--resolved-only", action="store_true",
+                        help="With --conversations-only, keep only attempts whose result has resolved=true")
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error(f"Output already exists: {args.output}")
     if args.max_messages <= 0 or args.max_chars <= 0:
         parser.error("--max-messages and --max-chars must be positive")
-    paths = ([args.input] if args.input.is_file() and args.input.name == "anthropic_exchanges.json"
-             else sorted(args.input.rglob("anthropic_exchanges.json")) if args.input.is_dir() else [])
+    if args.conversations_only == (args.mode is not None):
+        parser.error("pass exactly one of --mode or --conversations-only")
+    if args.skip_invalid and not args.conversations_only:
+        parser.error("--skip-invalid requires --conversations-only")
+    if args.source_commit and not args.conversations_only:
+        parser.error("--source-commit requires --conversations-only")
+    if (args.minimal or args.resolved_only) and not args.conversations_only:
+        parser.error("--minimal and --resolved-only require --conversations-only")
+    if args.minimal and args.source_commit:
+        parser.error("--minimal cannot be combined with --source-commit")
+    discovered = []
+    for input_path in args.input:
+        if input_path.is_file() and input_path.name == "anthropic_exchanges.json":
+            discovered.append(input_path)
+        elif input_path.is_dir():
+            discovered.extend(input_path.rglob("anthropic_exchanges.json"))
+    paths = sorted({path.resolve() for path in discovered})
     if not paths:
         parser.error("No anthropic_exchanges.json files found; other provider formats are not supported")
+    if args.conversations_only:
+        export_conversations(args, paths)
+        return
     args.output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".sft-export-", dir=args.output.parent))
     audit = []

@@ -56,6 +56,7 @@ def test_unknown_outcome_denominator_and_missing_edit(trace,make_trace,tmp_path)
     assert (dest/'batch_tasks.csv').exists()
     html=(dest/'batch_report.html').read_text()
     assert 'Whole-batch report' in html and 'report.html?task=' in html
+    assert 'Behavior diagnostics' in html and 'behaviorSummaryTable' in html
     assert 'plotly' in html
     assert len(load_experiment(tmp_path).runs)==2
 
@@ -64,9 +65,13 @@ def test_empty_batch(tmp_path):
     e,m,f,b=batch_for(tmp_path)
     assert b.overview['resolved_rate'] is None
     assert b.workflow.denominator.tolist()==[0]*5
+    assert {'Valid command execution','Valid test selection','Edit recovery','Feedback recovery'} <= set(b.behavior_summary.indicator)
     assert b.submission['attempts']==0
     assert build_batch_figures(b)
-    export_report(e,m,f,tmp_path/'reports')
+    dest=export_report(e,m,f,tmp_path/'reports')
+    assert (dest/'batch_behavior_summary.csv').exists()
+    assert (dest/'batch_behavior_tasks.csv').exists()
+    assert (dest/'batch_behavior_events.csv').exists()
 
 
 def test_notebook_generates_batch_report():

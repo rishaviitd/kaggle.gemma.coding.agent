@@ -6,8 +6,10 @@ from plotly.offline import get_plotlyjs
 
 def write_html(e,m,f,path):
     from ..exports import records
+    from ..metrics.behavior import compute_behavior
+    behavior=compute_behavior(e)
     payload={name:records(getattr(e,name)) for name in ['runs','turns','tool_calls','tool_results','events','patches','test_evidence','quality_issues','evidence','intake']}
-    payload.update(metrics=records(m.metrics),findings=records(f.findings),primary=records(f.primary),pairing=records(m.pairing),gold=records(m.gold),modules=records(m.modules),summary=m.summary)
+    payload.update(metrics=records(m.metrics),findings=records(f.findings),primary=records(f.primary),pairing=records(m.pairing),gold=records(m.gold),modules=records(m.modules),summary=m.summary,behavior_events=records(behavior.events),behavior_tasks=records(behavior.tasks))
     if not m.reviews.empty:
         payload['llm_reviews']=records(m.reviews)
     data=json.dumps(payload,ensure_ascii=False,separators=(',',':')).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')

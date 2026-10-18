@@ -29,6 +29,35 @@ Output is `train.jsonl` and `manifest.json` (`gemma4-sft-v3`). An existing outpu
 directory is not overwritten. Any invalid task aborts the batch and publishes
 nothing. Pass `--enable-thinking` through to the chat template at train time.
 
+## Conversations-only export
+
+Instead of `--mode`, to prepare normalized JSON for a later Unsloth preprocessing step, without
+loading a tokenizer or generating token IDs, use:
+
+```bash
+.venv/bin/python scripts/sft_export/export_sft.py INPUT_ROOT [MORE_ROOTS ...] \
+  --output "data/transient/haiku datasets v1" \
+  --conversations-only --minimal --resolved-only \
+  --retain-reasoning --enable-thinking
+```
+
+This mode creates `train.jsonl` and, with `--skip-invalid`, `rejected.jsonl`.
+With `--minimal`, each training row contains only standard `messages` and
+`tools`. Without it, rows also contain source path and SHA-256 provenance, the
+pinned Gemma template identity, and the template arguments Unsloth should apply
+later; `--source-commit` can add commit provenance. Neither mode renders the
+template, tokenizes, or creates labels.
+Per-assistant-message `_train` metadata is retained so later preprocessing can
+distinguish generated targets from assistant history carried across compaction.
+Tool messages are observations and must remain loss-masked when labels are made.
+Unsloth documents applying a chat template before response-only training in its
+[LoRA guide](https://docs.unsloth.ai/basics/lora-parameters-encyclopedia#training-on-completions-only-masking-out-inputs).
+`--minimal` limits each training row to `messages` and `tools`.
+`--resolved-only` reads the adjacent `results/<task_id>.json` and includes an
+attempt only when `resolved` is exactly `true`; missing or malformed result
+metadata fails the export rather than guessing.
+
+
 ## Verify
 
 ```bash
