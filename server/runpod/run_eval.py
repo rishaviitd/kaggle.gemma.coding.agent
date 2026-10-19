@@ -3,6 +3,10 @@
 Uses submission sampling/limits from src/rishav/itr-1 unless you pass CLI
 overrides via task_pipeline. Parallelism = number of worker processes
 (EVAL_WORKERS), each running one task at a time against the shared vLLM.
+
+BENCHMARK_MODEL picks the served model: gemma4 (base, default) or a LoRA
+adapter name from serve.sh, e.g. aurora-epoch1. Each model gets its own
+default run name so --resume never mixes base and adapter results.
 """
 import os
 import subprocess
@@ -23,7 +27,8 @@ API = os.environ.get(
     "https://t4r30ysyfmt164-8000.proxy.runpod.net/v1",
 )
 WORKERS = int(os.environ.get("EVAL_WORKERS", "8"))
-RUN_NAME = os.environ.get("BENCHMARK_RUN_NAME", "e4b-benchmark")
+MODEL = os.environ.get("BENCHMARK_MODEL", "gemma4")
+RUN_NAME = os.environ.get("BENCHMARK_RUN_NAME") or ("e4b-benchmark" if MODEL == "gemma4" else f"e4b-{MODEL}")
 SUBMISSION = os.environ.get("BENCHMARK_SUBMISSION", "src/rishav/itr-1")
 
 
@@ -35,6 +40,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
     print(f"RunPod benchmark: {len(tasks)} tasks, {workers} workers, run={RUN_NAME}", flush=True)
     print(f"API: {API}", flush=True)
+    print(f"Model: {MODEL}", flush=True)
     print(f"Submission: {SUBMISSION}", flush=True)
     print(f"Logs: logs/remote/{Path(SUBMISSION).relative_to('src')}/{RUN_NAME}/val/", flush=True)
     processes = []
@@ -49,7 +55,7 @@ def main():
             "--val", "--task-ids", *chunk,
             "--submission", SUBMISSION,
             "--run-name", RUN_NAME,
-            "--provider", "vllm", "--model", "gemma4",
+            "--provider", "vllm", "--model", MODEL,
             "--api-base", API,
             "--skip-langfuse", "--resume",
         ]

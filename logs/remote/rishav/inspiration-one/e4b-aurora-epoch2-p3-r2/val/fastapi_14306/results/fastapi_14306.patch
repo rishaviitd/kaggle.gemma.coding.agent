@@ -1,0 +1,168 @@
+diff --git a/fastapi/exception_handlers.py b/fastapi/exception_handlers.py
+index 475dd7bd..b8c3fe18 100644
+--- a/fastapi/exception_handlers.py
++++ b/fastapi/exception_handlers.py
+@@ -1,29 +1,38 @@
+ from fastapi.encoders import jsonable_encoder
+-from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
+-from fastapi.utils import is_body_allowed_for_status_code
+-from fastapi.websockets import WebSocket
+-from starlette.exceptions import HTTPException
+-from starlette.requests import Request
+-from starlette.responses import JSONResponse, Response
+-from starlette.status import WS_1008_POLICY_VIOLATION
+-
+-
+-async def http_exception_handler(request: Request, exc: HTTPException) -> Response:
+-    headers = getattr(exc, "headers", None)
+-    if not is_body_allowed_for_status_code(exc.status_code):
+-        return Response(status_code=exc.status_code, headers=headers)
+     return JSONResponse(
+-        {"detail": exc.detail}, status_code=exc.status_code, headers=headers
++        status_code=422,
++        content=jsonable_encoder(exc.errors()),
+     )
+ 
+ 
+-async def request_validation_exception_handler(
+-    request: Request, exc: RequestValidationError
+-) -> JSONResponse:
+-    return JSONResponse(
+-        status_code=422,
+-        content={"detail": jsonable_encoder(exc.errors())},
+-    )
++def _extract_context(exc: RequestValidationError) -> str:
++    """Extract endpoint context from a validation exception."""
++    exc_type = type(exc)
++    exc_name = exc_type.__name__
++    exc = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
++    if not exc:
++        return ""
++    for frame in exc.__traceback__:
++        if exc_type_name in frame.exc_value.__name__:
++            code = frame.f_code
++            frame_file = frame.f_lineno
++            if ("fastapi.routing" in code.co_filename and ("def " in code.co_name or "async def " in code.co_name)):
++                frame_globals = frame.f_globals
++                route = frame_globals.get("_", "")
++                for dec in inspect.getsource(code.co_name).split("\n"):
++                    if dec.strip().startswith("@"):
++                        route = dec.strip()
++                        break
++                method = ""
++                for m in ["@app.get", "@app.post", "@app.put", "@app.delete", "@app.patch", "@app.websocket"]:
++                    if route.startswith(m):
++                        method = m.split(".")[-1].replace("@", "")
++                        break
++                return (
++                    f"\n  File \"{frame.f_code.co_filename}\", line {frame_file}, in {code.co_name}\n"
++                    f"    {method} {route}\n"
++                )
++    return ""
+ 
+ 
+ async def websocket_request_validation_exception_handler(
+@@ -32,3 +41,28 @@ async def websocket_request_validation_exception_handler(
+     await websocket.close(
+         code=WS_1008_POLICY_VIOLATION, reason=jsonable_encoder(exc.errors())
+     )
++
++
++def _forward_validation_error(
++    request: Request, exc: RequestValidationError, _forward: bool = True
++) -> JSONResponse:
++    response = request_validation_exception_handler(request, exc)
++    if _forward:
++        exc.__cause__ = _forward_validation_error(request, exc)
++    return response
++
++
++def _forward_response_validation_error(
++    exc: ResponseValidationError, _forward: bool = True
++) -> ResponseValidationError:
++    if _forward:
++        exc.__cause__ = _forward_response_validation_error(exc)
++    return exc
++
++
++def _forward_websocket_request_validation_error(
++    websocket: WebSocket, exc: WebSocketRequestValidationError, _forward: bool = True
++) -> None:
++    if _forward:
++        exc.__cause__ = _forward_websocket_request_validation_error(exc)
++    return exc
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..d004ddc3 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -1,4 +1,5 @@
+ from typing import Any, Dict, Optional, Sequence, Type, Union
++from inspect import getsource
+ 
+ from annotated_doc import Doc
+ from pydantic import BaseModel, create_model
+@@ -177,8 +178,60 @@ class ResponseValidationError(ValidationException):
+         super().__init__(errors)
+         self.body = body
+ 
++    def _get_context(self) -> str:
++        if not hasattr(self, "_endpoint_context"):
++            self._endpoint_context = self._extract_context()
++        return self._endpoint_context
++
++    def _extract_context(self) -> str:
++        # Extract context once per endpoint and cache it
++        exc_type = type(self)
++        exc_name = exc_type.__name__
++        
++        # Use the exception's __cause__ or __context__ to find the endpoint
++        exc = getattr(self, "__cause__", None) or getattr(self, "__context__", None)
++        if not exc:
++            return ""
++
++        # Get the frame where the exception was raised
++        exc_type_name = exc_type.__name__
++        exc_value_name = exc_type.__name__
++        
++        # Walk the stack to find the FastAPI routing frame
++        for frame in exc.__traceback__:
++            if exc_type_name in frame.exc_value.__name__:
++                code = frame.f_code
++                frame_file = frame.f_lineno
++                
++                # Check if this frame is in an app's request/websocket handler
++                if (
++                    "fastapi.routing" in code.co_filename
++                    and ("def " in code.co_name or "async def " in code.co_name)
++                ):
++                    # Get the route from the frame's globals
++                    frame_globals = frame.f_globals
++                    route = frame_globals.get("_", "")
++                    
++                    # Heuristic: look for a route decorator on the function
++                    for dec in inspect.getsource(code.co_name).split("\n"):
++                        if dec.strip().startswith("@"):
++                            route = dec.strip()
++                            break
++                    
++                    # Extract HTTP method from the route string
++                    method = ""
++                    for m in ["@app.get", "@app.post", "@app.put", "@app.delete", "@app.patch", "@app.websocket"]:
++                        if route.startswith(m):
++                            method = m.split(".")[-1].replace("@", "")
++                            break
++                    
++                    return (
++                        f"\n  File \"{frame.f_code.co_filename}\", line {frame_file}, in {code.co_name}\n"
++                        f"    {method} {route}\n"
++                    )
++        return ""
++
+     def __str__(self) -> str:
+-        message = f"{len(self._errors)} validation errors:\n"
+-        for err in self._errors:
+-            message += f"  {err}\n"
+-        return message
++        message = super().__str__()
++        context = self._get_context()
++        return message + context

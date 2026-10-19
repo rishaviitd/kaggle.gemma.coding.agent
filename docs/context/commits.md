@@ -124,3 +124,35 @@
 
 ## codebase — 2026-10-19 (merged origin/main)
 - Merged 5 remote commits (Haiku SFT conversation dataset, resolved-only export, eval UI behavior diagnostics, Gemma 4 E4B QLoRA run20 traces). `export_sft.py`: kept the local prefix/trajectory exporter and added the remote `--conversations-only` mode (`--minimal`, `--resolved-only`, `--skip-invalid`, `--source-commit`, multiple inputs) as `export_conversations`; exactly one of `--mode` / `--conversations-only` is required. README keeps the local text plus a Conversations-only section. Remote `eval_ui` files placed under `viewer/eval_ui/`; trace index entry landed in `viewer/trace-index.json`. 31 exporter tests (incl. the 2 remote ones), 7 script, 19 trainer tests pass.
+
+## codebase — 2026-10-19 (first-exp-r64 adapters downloaded)
+- Kaggle kernel v2 `gemma-4-e4b-qat-trajectory-lora-rank-sweep` COMPLETE: 442 rows, 0 rejected, 3 epochs / 333 steps in 3 h 03 m on 4×L4, train_loss 0.306. Mean loss per epoch 0.512 → 0.257 → 0.149 (last step 0.107). No eval yet.
+- Adapters in `adapters/first-exp-r64/{epoch1,epoch2,epoch3,final}` (only `adapter_config.json` + `adapter_model.safetensors`, 558 MB each, fp32; `final` == `epoch3` by sha256), plus `r64.json`, `trainer_state.json`, `training.log`. Full Kaggle output kept in `data/transient/kaggle-output-r64/`. Safetensors are gitignored.
+- adapter_config: r=64, alpha=128, regex `target_modules` over language_model q/k/v/o/gate/up/down, base path = Kaggle `gemma-4-e4b-it-qat-q4_0-unquantized`.
+- Uploaded `epoch1/` and `epoch2/` (adapter_config + safetensors), `trainer_state.json`, `r64.json` and a dataset card to HF dataset `lonelyforever/gemma4-e4b-qat-lora-adapters-r64-aurora` (made public 2026-10-19) (code word `aurora` = this first run). sha256 verified against local files.
+
+## codebase — 2026-10-19 (RunPod benchmark: optional LoRA adapters from Hugging Face)
+- `server/runpod/serve.sh`: optional `LORA_REPO` (HF repo, default type `dataset`) + `LORA_ADAPTERS` (subfolders, e.g. `"epoch1 epoch2"`). Downloads only `adapter_config.json` + `adapter_model.safetensors` per adapter to `/workspace/adapters/<repo>/<sub>` (skipped when present) and adds `--enable-lora --max-lora-rank ${LORA_MAX_RANK:-64} --max-loras N --lora-modules <prefix>-<sub>=...`; prefix defaults to the repo's code word (`aurora`). Base stays served as `gemma4`. Without `LORA_REPO` the command is unchanged.
+- `server/runpod/run_eval.py`: `BENCHMARK_MODEL` (default `gemma4`, or e.g. `aurora-epoch1`); default run name `e4b-<model>` for adapters so `--resume` never mixes with base results. Removed the hard-coded `BENCHMARK_RUN_NAME` default from `run_benchmark_tasks.sh`; `benchmark_api.py` also honours `BENCHMARK_MODEL`.
+- Checked with stubbed `vllm`/`hf`: base-only args unchanged, LoRA args and download includes correct, second start skips download, missing `LORA_ADAPTERS` fails clearly. Not yet run on a pod.
+
+- `.gitignore`: ignore `/adapters/` (local LoRA checkpoints; published copies live on Hugging Face).
+
+- Added `docs/learning/distributed_training.md`: LoRA on 4×L4, model vs data parallel, hybrid 2+2 layout, batch/steps tradeoffs (§13).
+
+- `docs/learning/distributed_training.md`: L4 VRAM 24 GB; added Gemma 4 E4B bf16 size (~15 GB weights, ~17.9 GB inference load, ~8B checkpoint params).
+
+- `docs/learning/distributed_training.md`: short note on why QLoRA is avoided (NF4 vs QAT w4a16 train/serve mismatch).
+
+- `docs/learning/distributed_training.md`: exact HF ids (`gemma-4-E4B-it-qat-q4_0-unquantized` bf16 ~15 GB; `qat-w4a16-ct` serve ~4.5 GB packed).
+
+- codebase: `server/runpod/serve.sh` adapter download fixed: `hf download --include a b` only fetched the last file (no `adapter_config.json`, vLLM failed to load LoRA). Now passes file names positionally and re-downloads if either file is missing. Verified on pod `1xin1uqmtbuai4`: `/v1/models` lists `gemma4`, `aurora-epoch1`, `aurora-epoch2`.
+
+- Uploaded `epoch3` adapter to HF dataset `lonelyforever/gemma4-e4b-qat-lora-adapters-r64-aurora` (epoch1/2/3 now present). Rebuilt `viewer/trace-index.json` to include aurora benchmark runs.
+
+## eval — 2026-10-19 (aurora LoRA pass@3 vs base E4B, inspiration-one val20)
+- RunPod pod `1xin1uqmtbuai4` (A100 80GB, volume `gemma-qat-weights`), vLLM base `gemma4` + adapters `aurora-epoch1` / `aurora-epoch2` from HF; 20 val tasks, 6 workers, 3 runs per checkpoint. Traces: `logs/remote/rishav/inspiration-one/e4b-aurora-epoch{1,2}-p3-r{1,2,3}/`.
+- **Base** (`e4b-inspiration-one`, `e4b-insp-p3-r2`, `e4b-insp-p3-r3`): runs **4/20, 5/20, 1/20** → **pass@3 = 5/20** (`fastapi_14077`, `fastapi_14794`, `requests_7205`, `requests_7427`, `rich_3905`).
+- **Epoch 1**: **3/20, 2/20, 2/20** → **pass@3 = 3/20** (`fastapi_14077`, `requests_7427`, `rich_3905`). Regression vs base; long trajectories, many `BudgetExceeded` after 28-call cap.
+- **Epoch 2**: **4/20, 3/20, 5/20** → **pass@3 = 7/20** (+2 vs base): adds `fastapi_5624`, `httpx_3672`, `rich_3506`; keeps `requests_7427`; loses `fastapi_14794` vs base union.
+- Pod stopped after runs completed. `viewer/trace-index.json` regenerated (1269 traces).

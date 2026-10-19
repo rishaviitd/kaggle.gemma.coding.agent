@@ -24,7 +24,7 @@ async def one(client: httpx.AsyncClient, sem: asyncio.Semaphore, payload: dict) 
 async def sweep(base: str, key: str | None, concurrencies: list[int], requests_each: int) -> None:
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     payload = {
-        "model": "gemma4",
+        "model": os.getenv("BENCHMARK_MODEL", "gemma4"),
         "messages": [{"role": "user", "content": "Reply with exactly: ok"}],
         "max_tokens": 16,
         "temperature": 0.2,

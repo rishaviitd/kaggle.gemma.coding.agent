@@ -1,0 +1,79 @@
+diff --git a/fastapi/dependencies/models.py b/fastapi/dependencies/models.py
+index d6359c0f..c11f6250 100644
+--- a/fastapi/dependencies/models.py
++++ b/fastapi/dependencies/models.py
+@@ -41,13 +41,24 @@ class Dependant:
+     security_scopes: Optional[List[str]] = None
+     use_cache: bool = True
+     path: Optional[str] = None
++    security_scopes_used: bool = False
+     scope: Union[Literal["function", "request"], None] = None
+ 
++    def _security_scopes_used(self) -> bool:
++        if self.security_scopes is not None:
++            return True
++        for sub_dependant in self.dependencies:
++            if sub_dependant.use_cache and sub_dependant.security_scopes_used:
++                return True
++        return False
++
+     @cached_property
+     def cache_key(self) -> DependencyCacheKey:
+         return (
+             self.call,
+-            tuple(sorted(set(self.security_scopes or []))),
++            tuple(sorted(set(self.security_scopes or [])))
++            if self._security_scopes_used()
++            else (),
+             self.computed_scope or "",
+         )
+ 
+diff --git a/fastapi/dependencies/utils.py b/fastapi/dependencies/utils.py
+index 45353835..0f6274b4 100644
+--- a/fastapi/dependencies/utils.py
++++ b/fastapi/dependencies/utils.py
+@@ -145,8 +145,22 @@ def get_flat_dependant(
+ ) -> Dependant:
+     if visited is None:
+         visited = []
++    security_scopes_used: bool = False
+     visited.append(dependant.cache_key)
+ 
++    if dependant.security_scopes is not None:
++        security_scopes_used = True
++    else:
++        for sub_dependant in dependant.dependencies:
++            if skip_repeats and sub_dependant.cache_key in visited:
++                continue
++            flat_sub = get_flat_dependant(
++                sub_dependant, skip_repeats=skip_repeats, visited=visited,
++                security_scopes_used=security_scopes_used
++            )
++            if flat_sub.security_scopes is not None:
++                security_scopes_used = True
++    
+     flat_dependant = Dependant(
+         path_params=dependant.path_params.copy(),
+         query_params=dependant.query_params.copy(),
+@@ -156,20 +170,8 @@ def get_flat_dependant(
+         security_requirements=dependant.security_requirements.copy(),
+         use_cache=dependant.use_cache,
+         path=dependant.path,
++        security_scopes_used=security_scopes_used,
+     )
+-    for sub_dependant in dependant.dependencies:
+-        if skip_repeats and sub_dependant.cache_key in visited:
+-            continue
+-        flat_sub = get_flat_dependant(
+-            sub_dependant, skip_repeats=skip_repeats, visited=visited
+-        )
+-        flat_dependant.path_params.extend(flat_sub.path_params)
+-        flat_dependant.query_params.extend(flat_sub.query_params)
+-        flat_dependant.header_params.extend(flat_sub.header_params)
+-        flat_dependant.cookie_params.extend(flat_sub.cookie_params)
+-        flat_dependant.body_params.extend(flat_sub.body_params)
+-        flat_dependant.security_requirements.extend(flat_sub.security_requirements)
+-    return flat_dependant
+ 
+ 
+ def _get_flat_fields_from_params(fields: List[ModelField]) -> List[ModelField]:
