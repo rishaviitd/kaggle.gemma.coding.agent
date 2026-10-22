@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import math
 import queue
 import subprocess
 import sys
@@ -66,6 +67,13 @@ class EndpointPool:
             yield endpoint
         finally:
             self._free.put(endpoint)
+
+
+def resolve_jobs_per_endpoint(workers: int, endpoints: list[str], jobs_per_endpoint: int | None = None) -> int:
+    """Explicit value, or by default enough per endpoint that the pool covers --workers."""
+    if jobs_per_endpoint is not None:
+        return jobs_per_endpoint
+    return math.ceil(workers / len(endpoints))
 
 
 def effective_concurrency(workers: int, endpoints: list[str], jobs_per_endpoint: int) -> int:
@@ -162,8 +170,9 @@ def main():
     p.add_argument('--run-prefix', required=True, help='Run name prefix, e.g. oec-v1; attempts become <prefix>-a1...')
     p.add_argument('--api-base', required=True, nargs='+',
                    help='Student vLLM base(s), one per GPU, e.g. http://127.0.0.1:8002/v1 http://127.0.0.1:8003/v1')
-    p.add_argument('--jobs-per-endpoint', type=int, default=1,
-                   help='Max concurrent jobs per student endpoint (default 1)')
+    p.add_argument('--jobs-per-endpoint', type=int, default=None,
+                   help='Max concurrent jobs per student endpoint. Default: ceil(--workers / number of endpoints), '
+                        'so the default concurrency equals --workers.')
     p.add_argument('--submission', type=Path, default=ROOT / 'src/rishav/inspiration-one')
     p.add_argument('--student-model', default='gemma4')
     p.add_argument('--teacher-model', default='claude-haiku-5-5')
@@ -196,10 +205,11 @@ def main():
         validate_stage(args, jobs)
     except ValueError as error:
         p.error(str(error))
-    if args.jobs_per_endpoint < 1:
+    if args.jobs_per_endpoint is not None and args.jobs_per_endpoint < 1:
         p.error('--jobs-per-endpoint must be at least 1')
-    pool = EndpointPool(args.api_base, args.jobs_per_endpoint)
-    concurrency = effective_concurrency(args.workers, args.api_base, args.jobs_per_endpoint)
+    per_endpoint = resolve_jobs_per_endpoint(args.workers, args.api_base, args.jobs_per_endpoint)
+    pool = EndpointPool(args.api_base, per_endpoint)
+    concurrency = effective_concurrency(args.workers, args.api_base, per_endpoint)
     todo = [job for job in jobs if not job_done(ROOT, submission_rel, job, args.stage)]
     print(f'{len(tasks)} verified tasks x {args.attempts} attempts', flush=True)
     print(f'{len(jobs)} planned, {len(jobs) - len(todo)} already done, {len(todo)} to run, '

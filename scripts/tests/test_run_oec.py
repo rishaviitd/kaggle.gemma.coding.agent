@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -175,7 +176,6 @@ class EndpointPoolTests(unittest.TestCase):
     def test_pool_holds_each_endpoint_jobs_per_endpoint_times(self):
         pool = oec.EndpointPool(['u0', 'u1'], jobs_per_endpoint=3)
         self.assertEqual(pool.size, 6)
-        from contextlib import ExitStack
         with ExitStack() as stack:
             held = [stack.enter_context(pool.lease()) for _ in range(6)]
             self.assertEqual(sorted(held), ['u0'] * 3 + ['u1'] * 3)
@@ -231,6 +231,34 @@ class EndpointPoolTests(unittest.TestCase):
             thread.join(timeout=10)
         self.assertEqual(worst, {'u0': 2, 'u1': 2})
         self.assertEqual(pool.available, 4)
+
+
+class DefaultConcurrencyTests(unittest.TestCase):
+    def test_default_per_endpoint_spreads_workers_across_endpoints(self):
+        self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0']), 4)
+        self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0', 'u1']), 2)
+        self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0', 'u1', 'u2']), 2)
+        self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0', 'u1', 'u2', 'u3']), 1)
+
+    def test_explicit_per_endpoint_is_kept(self):
+        self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0', 'u1'], 1), 1)
+        self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0'], 3), 3)
+
+    def test_default_concurrency_equals_workers(self):
+        for workers in range(1, 9):
+            for count in range(1, 5):
+                endpoints = [f'u{i}' for i in range(count)]
+                per = oec.resolve_jobs_per_endpoint(workers, endpoints)
+                with self.subTest(workers=workers, endpoints=count):
+                    self.assertEqual(oec.effective_concurrency(workers, endpoints, per), workers)
+
+    def test_four_endpoints_four_workers_is_one_job_per_gpu(self):
+        endpoints = ['u0', 'u1', 'u2', 'u3']
+        pool = oec.EndpointPool(endpoints, oec.resolve_jobs_per_endpoint(4, endpoints))
+        self.assertEqual(pool.size, 4)
+        with ExitStack() as stack:
+            held = sorted(stack.enter_context(pool.lease()) for _ in range(4))
+        self.assertEqual(held, endpoints)
 
 
 class DispatchTests(unittest.TestCase):
