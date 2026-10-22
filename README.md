@@ -332,6 +332,41 @@ loss masks, use
 [SFT export guide](scripts/sft_export/README.md) for commands, output format, and
 cited template/training references.
 
+### Fine-tune Gemma 4 E4B-it with QLoRA (experimental)
+
+Training scripts and run history live in
+[`training/gemma4_e4b_qlora/`](training/gemma4_e4b_qlora/); the full step-by-step
+record, including failures and their causes, is in
+[`LEARNING_NOTES.md`](training/gemma4_e4b_qlora/LEARNING_NOTES.md).
+
+- **Data:** 216 tokenized rows from 190 resolved Haiku trajectories (69 tasks). The
+  conversations export has 220 rows from 192 trajectories; `rich_4076` and `rich_3894`
+  (4 rows) are rejected because the template would strip their retained reasoning.
+  These rows mix train, dev and val tasks, so dev/val are no longer held out.
+- **Trainer:** `unsloth_train/train_unsloth.py`, one Kaggle L4, offline. Dependencies
+  are bundled as Kaggle datasets: Unsloth 2026.10.6, `trl` 1.15.0, `bitsandbytes`
+  0.50.2, and an xformers 0.0.35 wheel built from source for the image's Python 3.13 /
+  torch 2.11 cu128 (PyPI has no cp313 wheel).
+- **Hyperparameters:** 1 epoch, lr 1e-4 cosine, 5% warmup, global batch 4 (1 x grad
+  accum 4), LoRA r=16 / alpha=32 / dropout 0.05 on language-model projections, 4-bit NF4.
+- **Status:** v5 trained (54 steps, train_loss 1.093); the adapter is published as
+  `akshayggupta1/gemma4-e4b-unsloth-qlora-adapter-v5`. A one-task harness run on `rich_3052`
+  (`e2e_kernel/`) runs end to end. v15 is the first valid run: tool calls are clean, but it timed
+  out after 3 model calls because our Unsloth server generates at ~4.5 tok/s versus ~75–82 tok/s for
+  the vLLM-served E4B baseline. No fair task-solving number exists for the adapter yet.
+- **Serving (changing):** because of that speed gap, the adapter will be served with the
+  competition's vLLM 0.19.1 as a LoRA on `gemma-4-e4b-it`, on the competition's pinned Python 3.12
+  image. Probe v1 passed (vLLM starts on the pinned image, loads the adapter, and parses tool calls
+  over two turns) at 23.2 tok/s, still below the baseline's 75–82, so the speed gap is not closed.
+  The Unsloth server (`unsloth_serve/unsloth_serve.py`, parser tests in `test_gemma_output.py`) is
+  kept for reference only.
+
+```bash
+uvx --from kaggle==2.2.4 kaggle kernels push -p training/gemma4_e4b_qlora/unsloth_train --accelerator NvidiaL4
+uvx --from kaggle==2.2.4 kaggle kernels push -p training/gemma4_e4b_qlora/e2e_kernel --accelerator NvidiaL4
+uvx --from kaggle==2.2.4 kaggle kernels status akshayggupta1/gemma4-e2e-one-task-rich3052
+```
+
 ### Launch Kaggle, download its output, and upload its trace
 
 From the repository root, push and monitor the offline competition notebook:

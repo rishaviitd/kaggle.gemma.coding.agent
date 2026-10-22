@@ -202,6 +202,36 @@ class ReconstructionTests(unittest.TestCase):
             self.assertEqual(rows[0]["messages"][2]["reasoning"], "Inspect first")
             self.assertIn("filtered unresolved: 1", proc.stdout)
 
+    def test_resolved_task_only_keeps_failed_attempts_of_resolved_tasks(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            # task "solved" has two attempts: attempt-1 failed, attempt-2 passed.
+            # task "never" has one attempt that failed.
+            # Each attempt is its own task folder, whose name is the task_id the
+            # exporter reads results/<name>.json from.
+            specs = [("solved", False, "a1"), ("solved", True, "a2"), ("never", False, "a1")]
+            inputs = []
+            for task_id, resolved, attempt in specs:
+                task = root / "input" / attempt / task_id
+                task.mkdir(parents=True)
+                (task / "anthropic_exchanges.json").write_text(json.dumps(exchanges()))
+                results = task / "results"
+                results.mkdir()
+                (results / f"{task_id}.json").write_text(json.dumps({"resolved": resolved}))
+                inputs.append(task)
+
+            output = root / "out"
+            proc = subprocess.run([
+                sys.executable, str(Path(exporter.__file__)), *map(str, inputs),
+                "--output", str(output), "--conversations-only", "--minimal",
+                "--resolved-task-only", "--retain-reasoning", "--enable-thinking",
+            ], capture_output=True, text=True)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            rows = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertIn("filtered unresolved: 1", proc.stdout)
+
 
 class DatasetTests(unittest.TestCase):
     def setUp(self):
@@ -469,6 +499,35 @@ class CausalObservationTests(unittest.TestCase):
     def test_unknown_policy_is_rejected(self):
         with self.assertRaises(ValueError):
             exporter.compact_observations([], policy="nope")
+
+    def test_tokenized_resolved_task_only_keeps_all_attempts_of_resolved_tasks(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            # "solved" has a failed and a passed attempt; "never" failed once.
+            specs = [("solved", False, "a1"), ("solved", True, "a2"), ("never", False, "a1")]
+            inputs = []
+            for task_id, resolved, attempt in specs:
+                task = root / "input" / attempt / task_id
+                task.mkdir(parents=True)
+                (task / "anthropic_exchanges.json").write_text(json.dumps(exchanges()))
+                results = task / "results"
+                results.mkdir()
+                (results / f"{task_id}.json").write_text(json.dumps({"resolved": resolved}))
+                inputs.append(task)
+            output = root / "out"
+            proc = subprocess.run([
+                sys.executable, str(Path(exporter.__file__)), *map(str, inputs),
+                "--output", str(output), "--tokenizer", os.environ["GEMMA_SFT_TOKENIZER"],
+                "--local-files-only", "--retain-reasoning", "--enable-thinking", "--resolved-task-only",
+            ], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            rows = [json.loads(line) for line in (output / "train.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                self.assertEqual(len(row["input_ids"]), len(row["labels"]))
+                self.assertEqual(len(row["input_ids"]), len(row["attention_mask"]))
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(manifest["examples"], 2)
 
 
 if __name__ == "__main__":

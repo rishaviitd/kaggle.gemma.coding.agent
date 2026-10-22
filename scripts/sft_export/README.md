@@ -56,6 +56,8 @@ Unsloth documents applying a chat template before response-only training in its
 `--resolved-only` reads the adjacent `results/<task_id>.json` and includes an
 attempt only when `resolved` is exactly `true`; missing or malformed result
 metadata fails the export rather than guessing.
+`--resolved-task-only` is the task-level variant: it keeps every attempt (including
+failed ones) of each `task_id` that resolved in at least one attempt.
 
 
 ## Verify

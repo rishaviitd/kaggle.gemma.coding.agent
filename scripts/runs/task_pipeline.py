@@ -21,6 +21,9 @@ from swegemma.evaluate import Evaluator
 from swegemma.harness.container_setup import _is_wheel_compatible_py313
 from swegemma.models import load_tasks
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from subprocess_eval_setup import install_subprocess_dependencies
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'traces'))
 from langfuse_bridge import push_to_langfuse
 from vllm_trace_proxy import VllmTraceProxy
@@ -155,6 +158,8 @@ def arguments():
                    help='Provider API base; defaults to the selected provider environment variable.')
     p.add_argument('--iteration', type=int, default=1,
                    help='Positive experiment number used in Langfuse task names.')
+    p.add_argument('--sandbox', choices=('docker', 'subprocess'), default='docker',
+                   help='docker for local runs; subprocess for Kaggle (no Docker there).')
     p.add_argument('--max-tool-calls', type=int,
                    help='Override max_tool_calls from the submission eval config.')
     p.add_argument('--max-minutes', type=float,
@@ -400,7 +405,7 @@ async def run_one(args, working, agent_dir, key, task, index, total):
         embeddings_dir=str(embeddings.parent), wheels_dir=wheels,
         models=build_model_registry(proxy.api_base, key, args.litellm_model, agent_dir,
                                     args.reasoning_effort),
-        task_ids=[task.instance_id], sandbox='docker', image='swebench-sandbox:latest',
+        task_ids=[task.instance_id], sandbox=args.sandbox, image='swebench-sandbox:latest',
         max_tool_calls=args.max_tool_calls, max_time_minutes=args.max_minutes,
         timeout_seconds=args.timeout_seconds, max_turns=args.max_turns,
         concurrency=1, display_mode='auto',
@@ -452,6 +457,18 @@ async def run(args, working):
     if missing_wheels:
         raise ValueError('Task wheel caches are empty for: ' + ', '.join(missing_wheels)
                          + '. Build them with scripts/tasks/build_split_wheels.sh')
+    if args.sandbox == 'subprocess':
+        missing_pytest = [task_id for task_id in args.task_ids if not any(
+            path.name.lower().startswith('pytest-')
+            for path in args.asset_rows[task_id]['wheels'].glob('*.whl'))]
+        if missing_pytest:
+            raise ValueError('Subprocess sandbox requires cached pytest wheels for: '
+                             + ', '.join(missing_pytest))
+        # swegemma 0.2.11 skips dependency setup in subprocess mode. Its agent and
+        # verifier import this function directly, so replace both references.
+        from swegemma.harness import agent_runner, verification
+        agent_runner.install_test_dependencies = install_subprocess_dependencies
+        verification.install_test_dependencies = install_subprocess_dependencies
     incompatible = []
     for task_id in args.task_ids:
         wheels = list(args.asset_rows[task_id]['wheels'].glob('*.whl'))
