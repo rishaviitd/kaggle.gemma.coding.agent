@@ -1,4 +1,4 @@
-"""Snapshot written by the student run (Kaggle) and read by the teacher run (local Docker)."""
+"""Snapshot written by the student run (Kaggle) and read by the teacher run (local subprocess sandbox in a Linux container)."""
 from __future__ import annotations
 
 import json

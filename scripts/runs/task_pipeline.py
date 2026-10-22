@@ -213,7 +213,12 @@ def arguments():
     if args.handoff_stop_after_switch and args.handoff_after is None:
         p.error('--handoff-stop-after-switch needs --handoff-after')
     if args.handoff_resume is not None:
-        # The switch point comes from the snapshot; a given --handoff-after is checked in run().
+        # The recorded student side is a vLLM student run on the subprocess sandbox; the switch
+        # point comes from the snapshot and a given --handoff-after is checked in run().
+        if args.provider != 'vllm':
+            p.error('--handoff-resume needs --provider vllm (the recorded student)')
+        if args.sandbox != 'subprocess':
+            p.error('--handoff-resume needs --sandbox subprocess (the snapshot is subprocess-only)')
         if args.handoff_after is not None and args.handoff_after < 1:
             p.error('--handoff-after must be a positive integer')
     else:
@@ -464,6 +469,7 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
         # Run B: the student side is replayed from the snapshot, so no vLLM server runs.
         proxy.exchanges = list(handoff_snapshot['vllm_exchanges'])
     teacher_proxy = handoff = recorder = None
+    snapshot_failures = []
     registry = None
     if args.handoff:
         if not stop_mode:
@@ -476,18 +482,23 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
 
         def write_switch_snapshot() -> None:
             # Runs inside the switch call, before the stop, so the snapshot reflects exactly the
-            # student's turns.
-            write_snapshot(
-                task_logs / 'snapshot',
-                handoff={**handoff.record(), 'task_id': task.instance_id,
-                         **config_fingerprint(agent_dir, args.sandbox)},
-                student_responses=handoff.student_responses(),
-                session_events=recorder.recorded_events,
-                vllm_exchanges=proxy.exchanges,
-                manifest={**config_fingerprint(agent_dir, args.sandbox),
-                          'kaggle_kernel_version': os.getenv('KAGGLE_KERNEL_RUN_TYPE', 'unknown'),
-                          'accelerator': os.getenv('NVIDIA_DEVICE_TYPE', 'unknown')},
-            )
+            # student's turns. A failure is stored, not raised: swegemma would swallow it and
+            # the run would look like an ordinary failed task. run_one re-raises it after
+            # evaluate_task returns.
+            try:
+                write_snapshot(
+                    task_logs / 'snapshot',
+                    handoff={**handoff.record(), 'task_id': task.instance_id,
+                             **config_fingerprint(agent_dir, args.sandbox)},
+                    student_responses=handoff.student_responses(),
+                    session_events=recorder.recorded_events,
+                    vllm_exchanges=proxy.exchanges,
+                    manifest={**config_fingerprint(agent_dir, args.sandbox),
+                              'kaggle_kernel_version': os.getenv('KAGGLE_KERNEL_RUN_TYPE', 'unknown'),
+                              'accelerator': os.getenv('NVIDIA_DEVICE_TYPE', 'unknown')},
+                )
+            except Exception as error:
+                snapshot_failures.append(error)
 
         registry, handoff = build_handoff_registry(
             student_base=None if handoff_snapshot is not None else proxy.api_base,
@@ -530,7 +541,17 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
                 budget=config.budget, harness=config.harness)
         result = await evaluator.evaluate_task(task=task, task_index=index, total_tasks=total,
                                                context=context)
+        if snapshot_failures:
+            raise RuntimeError(f'snapshot write failed: {snapshot_failures[0]}') \
+                from snapshot_failures[0]
         if stop_mode and handoff.stopped:
+            # Summary shapes for the caller (run_oec.py must accept all three):
+            #   stopped at the switch: {task_id, stopped_at_switch: True, switch_after, snapshot,
+            #                           tool_calls}. No 'resolved' key and no result file.
+            #   ran to completion:     {task_id, resolved, test_exit_code, patch_chars,
+            #                           tool_calls, error[, stopped_at_switch: False][,
+            #                           replay_verified]}.
+            #   pipeline failure:      run() writes {task_id, resolved: False, error}.
             # The snapshot was written at the switch. Nothing else is recorded for a stopped run.
             summary = {'task_id': task.instance_id, 'stopped_at_switch': True,
                        'switch_after': handoff.switch_after,

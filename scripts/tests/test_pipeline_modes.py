@@ -45,7 +45,7 @@ class PipelineModeArgs(unittest.TestCase):
     def parse(self, *extra, tasks=('--task-id', TASK)):
         # Mirrors arguments()'s real requirements: --submission and a task selection.
         argv = ['task_pipeline.py', '--split', 'val', *tasks, '--provider', 'vllm',
-                '--submission', str(self.submission), *extra]
+                '--sandbox', 'subprocess', '--submission', str(self.submission), *extra]
         err = io.StringIO()
         with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stderr(err):
             try:
@@ -83,6 +83,14 @@ class PipelineModeArgs(unittest.TestCase):
         self.assertIsNotNone(args, err)
         self.assertEqual(args.handoff_resume, Path('snap'))
         self.assertIsNone(args.handoff_after)
+
+    def test_resume_requires_the_vllm_provider(self):
+        self.assertRejected('--provider vllm', '--handoff-resume', 'snap',
+                            '--handoff-teacher-model', 'claude-haiku-5-5', '--provider', 'openai')
+
+    def test_resume_requires_the_subprocess_sandbox(self):
+        self.assertRejected('--sandbox subprocess', '--handoff-resume', 'snap',
+                            '--handoff-teacher-model', 'claude-haiku-5-5', '--sandbox', 'docker')
 
     def test_resume_is_single_task_only(self):
         args, err = self.parse('--handoff-resume', 'snap', '--handoff-teacher-model',
@@ -256,6 +264,14 @@ class RunOneHandoffModes(unittest.TestCase):
         self.assertEqual(FakeLiteLlm.calls, [])  # student replayed, teacher never reached here
         self.assertEqual(self.constructed, ['anthropic/claude-haiku-5-5'])  # teacher only
         self.assertTrue((self.logs / TASK / 'results' / f'{TASK}.json').is_file())
+
+    def test_a_failed_snapshot_write_fails_the_run_loudly(self):
+        ScriptedEvaluator.turns = self.switch_after + 1
+        with mock.patch.object(task_pipeline, 'write_snapshot',
+                               side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(RuntimeError, 'snapshot write failed.*disk full'):
+                self.run_mode()
+        self.assertFalse((self.logs / TASK / 'snapshot').exists())
 
     def test_run_b_rejects_a_changed_tool_result(self):
         ScriptedEvaluator.turns = self.switch_after + 1
