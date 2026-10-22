@@ -2,9 +2,11 @@
 import argparse
 import csv
 import json
+import queue
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,13 +44,54 @@ def plan_runs(tasks: dict[str, str], attempts: int, low: int, high: int, seed: i
     return jobs
 
 
-def command_for(job: dict, args) -> list[str]:
-    """Pipeline command for one job. stage None is the original full run (student and teacher together)."""
+class EndpointPool:
+    """Thread-safe lease of student endpoints. Each endpoint is listed jobs_per_endpoint times,
+    so it serves at most that many jobs at once; a leased endpoint goes back when its job exits."""
+
+    def __init__(self, endpoints: list[str], jobs_per_endpoint: int = 1):
+        self._free: queue.Queue = queue.Queue()
+        for endpoint in endpoints:
+            for _ in range(jobs_per_endpoint):
+                self._free.put(endpoint)
+        self.size = len(endpoints) * jobs_per_endpoint
+
+    @property
+    def available(self) -> int:
+        return self._free.qsize()
+
+    @contextmanager
+    def lease(self):
+        endpoint = self._free.get()
+        try:
+            yield endpoint
+        finally:
+            self._free.put(endpoint)
+
+
+def effective_concurrency(workers: int, endpoints: list[str], jobs_per_endpoint: int) -> int:
+    return min(workers, len(endpoints) * jobs_per_endpoint)
+
+
+def dispatch(jobs: list[dict], pool: EndpointPool, concurrency: int, run_job) -> list:
+    """Run each job on a leased endpoint via run_job(job, api_base); exit codes come back in job order."""
+    def leased(job):
+        with pool.lease() as api_base:
+            return run_job(job, api_base)
+
+    with ThreadPoolExecutor(concurrency) as executor:
+        return list(executor.map(leased, jobs))
+
+
+def command_for(job: dict, args, api_base: str | None = None) -> list[str]:
+    """Pipeline command for one job. stage None is the original full run (student and teacher together).
+    api_base is the endpoint leased for this job; it defaults to the first --api-base."""
     stage = getattr(args, 'stage', None)
+    if api_base is None:
+        api_base = args.api_base[0]
     command = [sys.executable, 'scripts/runs/task_pipeline.py',
                '--split', job['split'], '--task-id', job['task_id'],
                '--submission', str(args.submission), '--run-name', job['run_name'],
-               '--provider', 'vllm', '--model', args.student_model, '--api-base', args.api_base,
+               '--provider', 'vllm', '--model', args.student_model, '--api-base', api_base,
                '--handoff-teacher-model', args.teacher_model,
                '--handoff-teacher-thinking', args.teacher_thinking]
     if stage == 'teacher':
@@ -117,7 +160,10 @@ def validate_stage(args, jobs: list[dict]) -> None:
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--run-prefix', required=True, help='Run name prefix, e.g. oec-v1; attempts become <prefix>-a1...')
-    p.add_argument('--api-base', required=True, help='Student vLLM base, e.g. http://127.0.0.1:8002/v1')
+    p.add_argument('--api-base', required=True, nargs='+',
+                   help='Student vLLM base(s), one per GPU, e.g. http://127.0.0.1:8002/v1 http://127.0.0.1:8003/v1')
+    p.add_argument('--jobs-per-endpoint', type=int, default=1,
+                   help='Max concurrent jobs per student endpoint (default 1)')
     p.add_argument('--submission', type=Path, default=ROOT / 'src/rishav/inspiration-one')
     p.add_argument('--student-model', default='gemma4')
     p.add_argument('--teacher-model', default='claude-haiku-5-5')
@@ -150,9 +196,14 @@ def main():
         validate_stage(args, jobs)
     except ValueError as error:
         p.error(str(error))
+    if args.jobs_per_endpoint < 1:
+        p.error('--jobs-per-endpoint must be at least 1')
+    pool = EndpointPool(args.api_base, args.jobs_per_endpoint)
+    concurrency = effective_concurrency(args.workers, args.api_base, args.jobs_per_endpoint)
     todo = [job for job in jobs if not job_done(ROOT, submission_rel, job, args.stage)]
     print(f'{len(tasks)} verified tasks x {args.attempts} attempts', flush=True)
-    print(f'{len(jobs)} planned, {len(jobs) - len(todo)} already done, {len(todo)} to run', flush=True)
+    print(f'{len(jobs)} planned, {len(jobs) - len(todo)} already done, {len(todo)} to run, '
+          f'concurrency {concurrency}', flush=True)
     if args.dry_run:
         for job in todo:
             print(json.dumps(job))
@@ -160,16 +211,15 @@ def main():
     log_dir = ROOT / 'logs/oec_runs' / args.run_prefix
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(job):
+    def run(job, api_base):
         log = log_dir / f"{job['run_name']}-{job['task_id']}.log"
         with log.open('w') as output:
-            code = subprocess.run(command_for(job, args), cwd=ROOT, stdout=output,
+            code = subprocess.run(command_for(job, args, api_base), cwd=ROOT, stdout=output,
                                   stderr=subprocess.STDOUT).returncode
         print(f"{job['run_name']} {job['task_id']} k={job['switch_after']} exit={code}", flush=True)
         return code
 
-    with ThreadPoolExecutor(args.workers) as pool:
-        codes = list(pool.map(run, todo))
+    codes = dispatch(todo, pool, concurrency, run)
     failed = sum(not job_finished(ROOT, submission_rel, job, code, args.stage)
                  for job, code in zip(todo, codes))
     print(f'finished; {failed} process failure(s). Re-run the same command to retry missing jobs.')

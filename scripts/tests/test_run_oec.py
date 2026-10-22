@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,13 +43,29 @@ class PlanTests(unittest.TestCase):
     def test_command_passes_the_handoff_flags(self):
         job = {'task_id': 'a_1', 'split': 'train', 'attempt': 1, 'switch_after': 5, 'run_name': 'oec-x-a1'}
         args = SimpleNamespace(submission=Path('src/rishav/inspiration-one'), student_model='gemma4',
-                               api_base='http://127.0.0.1:8002/v1', teacher_model='claude-haiku-5-5',
+                               api_base=['http://127.0.0.1:8002/v1'], teacher_model='claude-haiku-5-5',
                                teacher_thinking='adaptive', sandbox='docker')
         command = oec.command_for(job, args)
         for flag, value in [('--handoff-after', '5'), ('--handoff-teacher-model', 'claude-haiku-5-5'),
                             ('--run-name', 'oec-x-a1'), ('--task-id', 'a_1'), ('--split', 'train'),
-                            ('--sandbox', 'docker'), ('--provider', 'vllm')]:
+                            ('--sandbox', 'docker'), ('--provider', 'vllm'),
+                            ('--api-base', 'http://127.0.0.1:8002/v1')]:
             self.assertEqual(command[command.index(flag) + 1], value)
+
+    def test_command_uses_the_endpoint_given_for_the_job(self):
+        args = SimpleNamespace(submission=Path('src/rishav/inspiration-one'), student_model='gemma4',
+                               api_base=['http://gpu0/v1', 'http://gpu1/v1'], teacher_model='claude-haiku-5-5',
+                               teacher_thinking='adaptive', sandbox='docker')
+        leased = oec.command_for(STAGE_JOB, args, 'http://gpu1/v1')
+        self.assertEqual(leased[leased.index('--api-base') + 1], 'http://gpu1/v1')
+        default = oec.command_for(STAGE_JOB, args)
+        self.assertEqual(default[default.index('--api-base') + 1], 'http://gpu0/v1')
+
+    def test_effective_concurrency_is_capped_by_workers_and_pool_size(self):
+        self.assertEqual(oec.effective_concurrency(4, ['u0'], 1), 1)
+        self.assertEqual(oec.effective_concurrency(4, ['u0', 'u1'], 1), 2)
+        self.assertEqual(oec.effective_concurrency(4, ['u0', 'u1'], 3), 4)
+        self.assertEqual(oec.effective_concurrency(3, ['u0', 'u1'], 3), 3)
 
     def test_job_done_needs_a_boolean_result_without_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,7 +82,7 @@ class PlanTests(unittest.TestCase):
 
 STAGE_JOB = {'task_id': 'a_1', 'split': 'train', 'attempt': 1, 'switch_after': 5, 'run_name': 'oec-x-a1'}
 STAGE_ARGS = dict(submission=Path('src/rishav/inspiration-one'), student_model='gemma4',
-                  api_base='http://127.0.0.1:8002/v1', teacher_model='claude-haiku-5-5',
+                  api_base=['http://127.0.0.1:8002/v1'], teacher_model='claude-haiku-5-5',
                   teacher_thinking='adaptive', sandbox='docker')
 
 
@@ -151,6 +169,101 @@ class StageTests(unittest.TestCase):
                                            sandbox='subprocess'), one)
         oec.validate_stage(SimpleNamespace(stage='student', handoff_snapshot=None,
                                            sandbox='docker'), [STAGE_JOB, STAGE_JOB])
+
+
+class EndpointPoolTests(unittest.TestCase):
+    def test_pool_holds_each_endpoint_jobs_per_endpoint_times(self):
+        pool = oec.EndpointPool(['u0', 'u1'], jobs_per_endpoint=3)
+        self.assertEqual(pool.size, 6)
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            held = [stack.enter_context(pool.lease()) for _ in range(6)]
+            self.assertEqual(sorted(held), ['u0'] * 3 + ['u1'] * 3)
+            self.assertEqual(pool.available, 0)
+
+    def test_endpoint_is_returned_when_the_job_raises(self):
+        pool = oec.EndpointPool(['u0'], jobs_per_endpoint=1)
+        with self.assertRaises(RuntimeError):
+            with pool.lease():
+                raise RuntimeError('job failed')
+        self.assertEqual(pool.available, 1)
+        with pool.lease() as endpoint:
+            self.assertEqual(endpoint, 'u0')
+
+    def test_concurrent_jobs_get_distinct_endpoints_with_one_job_each(self):
+        pool = oec.EndpointPool(['u0', 'u1', 'u2'], jobs_per_endpoint=1)
+        barrier = threading.Barrier(3)
+        seen = []
+        lock = threading.Lock()
+
+        def job():
+            with pool.lease() as endpoint:
+                barrier.wait(timeout=5)
+                with lock:
+                    seen.append(endpoint)
+
+        threads = [threading.Thread(target=job) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual(sorted(seen), ['u0', 'u1', 'u2'])
+
+    def test_leases_never_exceed_pool_size_or_per_endpoint_limit(self):
+        pool = oec.EndpointPool(['u0', 'u1'], jobs_per_endpoint=2)
+        lock = threading.Lock()
+        in_use = {'u0': 0, 'u1': 0}
+        worst = {'u0': 0, 'u1': 0}
+
+        def job():
+            with pool.lease() as endpoint:
+                with lock:
+                    in_use[endpoint] += 1
+                    worst[endpoint] = max(worst[endpoint], in_use[endpoint])
+                time.sleep(0.01)
+                with lock:
+                    in_use[endpoint] -= 1
+
+        threads = [threading.Thread(target=job) for _ in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(worst, {'u0': 2, 'u1': 2})
+        self.assertEqual(pool.available, 4)
+
+
+class DispatchTests(unittest.TestCase):
+    def run_fake(self, endpoints, jobs_per_endpoint, workers, jobs):
+        pool = oec.EndpointPool(endpoints, jobs_per_endpoint)
+        concurrency = oec.effective_concurrency(workers, endpoints, jobs_per_endpoint)
+        lock = threading.Lock()
+        in_use = {e: 0 for e in endpoints}
+        worst = {e: 0 for e in endpoints}
+        completed = []
+
+        def fake_runner(job, api_base):
+            with lock:
+                in_use[api_base] += 1
+                worst[api_base] = max(worst[api_base], in_use[api_base])
+            time.sleep(0.02)
+            with lock:
+                in_use[api_base] -= 1
+                completed.append(job['run_name'])
+            return 0
+
+        codes = oec.dispatch(jobs, pool, concurrency, fake_runner)
+        return codes, worst, completed, pool
+
+    def test_two_endpoints_four_jobs_respect_jobs_per_endpoint(self):
+        jobs = [{'run_name': f'r-a{i}'} for i in range(1, 5)]
+        for per_endpoint in (1, 2):
+            with self.subTest(jobs_per_endpoint=per_endpoint):
+                codes, worst, completed, pool = self.run_fake(['u0', 'u1'], per_endpoint, 4, jobs)
+                self.assertEqual(codes, [0, 0, 0, 0])
+                self.assertEqual(sorted(completed), sorted(j['run_name'] for j in jobs))
+                self.assertTrue(all(count <= per_endpoint for count in worst.values()))
+                self.assertEqual(pool.available, 2 * per_endpoint)
 
 
 if __name__ == '__main__':
