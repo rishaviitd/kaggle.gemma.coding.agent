@@ -178,7 +178,7 @@ def is_summary_call(exchange):
     return first.startswith(SUMMARY_PROMPT)
 
 
-def convert_task(exchanges, *, retain_reasoning=False, exclude_turns=None):
+def convert_task(exchanges, *, retain_reasoning=False, exclude_turns=None, first_context_prefix=False):
     """Split a task at each context compaction; return one example per segment.
 
     After compaction the agent continues from a replaced history ("For context:"
@@ -186,6 +186,8 @@ def convert_task(exchanges, *, retain_reasoning=False, exclude_turns=None):
     model saw. Assistant turns carried into that prompt are context-only (they
     were already supervised in the previous segment); summarizer calls are dropped.
     Turn numbers stay global (1-based over all model calls, as in the trace).
+    first_context_prefix: treat assistant turns already present in the first request as context-only
+    (OEC: the student prefix replayed in the teacher's first request).
     """
     if not isinstance(exchanges, list) or not exchanges:
         raise ValueError("No exchanges found")
@@ -225,7 +227,7 @@ def convert_task(exchanges, *, retain_reasoning=False, exclude_turns=None):
                      for c in m.get("tool_calls", [])}
             trailing = [{**r, "name": names[r["tool_call_id"]]} for r in trailing if r["tool_call_id"] in names]
         rows.append(convert_exchanges([e for _, e in seg], retain_reasoning=retain_reasoning, exclude_turns=excluded,
-                                      turns=[t for t, _ in seg], context_prefix=index > 0,
+                                      turns=[t for t, _ in seg], context_prefix=index > 0 or first_context_prefix,
                                       trailing_results=trailing))
     return rows
 
