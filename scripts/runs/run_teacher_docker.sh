@@ -133,8 +133,14 @@ if [[ -e "$repo/.env" ]]; then
     env_mounts=(-v /dev/null:/repo/.env:ro)
 fi
 
-exec docker run --rm --platform linux/amd64 \
+# task_pipeline calls provider_key('vllm') unconditionally in run(), before the resume branch, and
+# run_oec always passes --provider vllm. The placeholder only satisfies that check. On resume the
+# student is replayed from the snapshot, preflight is skipped, and --api-base points at the dead
+# local endpoint http://127.0.0.1:1/v1, so the value is never sent anywhere real. Not a secret.
+# --init makes tini PID 1 so SIGTERM/SIGINT reach the entrypoint and its chown trap runs.
+exec docker run --rm --init --platform linux/amd64 \
   -e ANTHROPIC_API_KEY \
+  -e VLLM_API_KEY=unused \
   -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
   -v "$repo:/repo" \
   ${env_mounts[@]+"${env_mounts[@]}"} \

@@ -107,7 +107,14 @@ else
     fi
 fi
 
-"$@"
+# Run the command in the background and wait on it: sh defers traps while a foreground child runs,
+# so a TERM from `docker stop` would otherwise wait for the command to finish. Stdin of a background
+# job is /dev/null under POSIX sh; the teacher stage does not read stdin.
+"$@" &
+child=$!
+rc=0
+wait "$child" || rc=$?
+exit "$rc"
 EOF
 
 ENTRYPOINT ["/usr/local/bin/oec-teacher-entrypoint"]
