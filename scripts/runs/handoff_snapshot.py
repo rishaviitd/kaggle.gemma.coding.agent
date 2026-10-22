@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 from handoff_llm import config_fingerprint
@@ -12,12 +14,28 @@ REQUIRED_FILES = ('handoff.json', 'student_responses.json', 'session_events.json
 
 def write_snapshot(out_dir: Path, *, handoff: dict, student_responses: list[dict],
                    session_events: list[dict], vllm_exchanges: list[dict], manifest: dict) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Write the five files atomically: all-or-nothing at out_dir.
+
+    Every payload is serialized before anything touches disk, so an unserializable payload
+    fails cleanly. Files go to a .tmp sibling that is renamed into place only when complete.
+    Any failure removes the .tmp directory, and an existing out_dir is replaced only then.
+    """
     payloads = {'handoff.json': handoff, 'student_responses.json': student_responses,
                 'session_events.json': session_events, 'vllm_exchanges.json': vllm_exchanges,
                 'manifest.json': manifest}
-    for name, payload in payloads.items():
-        (out_dir / name).write_text(json.dumps(payload, indent=2) + '\n')
+    texts = {name: json.dumps(payload, indent=2) + '\n' for name, payload in payloads.items()}
+    tmp_dir = out_dir.with_name(out_dir.name + '.tmp')
+    shutil.rmtree(tmp_dir, ignore_errors=True)  # debris from an earlier crash
+    try:
+        tmp_dir.mkdir(parents=True)
+        for name, text in texts.items():
+            (tmp_dir / name).write_text(text)
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        os.replace(tmp_dir, out_dir)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
 
 def read_snapshot(snapshot_dir: Path, *, agent_dir: Path, sandbox: str) -> dict:

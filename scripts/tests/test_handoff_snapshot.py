@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'runs'))
 import handoff_snapshot as snap  # noqa: E402
@@ -36,6 +37,49 @@ class SnapshotTests(unittest.TestCase):
             loaded = snap.read_snapshot(out, agent_dir=agent, sandbox='subprocess')
             self.assertEqual(loaded['handoff'], data['handoff'])
             self.assertEqual(loaded['student_responses'], data['student_responses'])
+
+    def test_rewrite_replaces_the_previous_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = write_agent(Path(tmp))
+            out = Path(tmp) / 'snapshot'
+            snap.write_snapshot(out, **sample(agent))
+            data = sample(agent)
+            data['student_responses'] = [{'content': {'parts': [{'text': 'new'}]}}]
+            snap.write_snapshot(out, **data)
+            self.assertEqual(snap.read_snapshot(out, agent_dir=agent, sandbox='subprocess')
+                             ['student_responses'], data['student_responses'])
+            self.assertFalse(out.with_name(out.name + '.tmp').exists())
+
+    def test_non_serializable_payload_leaves_no_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = write_agent(Path(tmp))
+            out = Path(tmp) / 'snapshot'
+            data = sample(agent)
+            data['session_events'] = [{'bad': object()}]
+            with self.assertRaises(TypeError):
+                snap.write_snapshot(out, **data)
+            self.assertFalse(out.exists())
+            self.assertFalse(out.with_name(out.name + '.tmp').exists())
+
+    def test_failure_on_the_third_file_leaves_neither_directory(self):
+        real_write_text = Path.write_text
+        calls = []
+
+        def flaky(self, data, *args, **kwargs):
+            calls.append(self.name)
+            if len(calls) == 3:
+                raise OSError('disk full')
+            return real_write_text(self, data, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = write_agent(Path(tmp))
+            out = Path(tmp) / 'snapshot'
+            with mock.patch.object(Path, 'write_text', flaky):
+                with self.assertRaisesRegex(OSError, 'disk full'):
+                    snap.write_snapshot(out, **sample(agent))
+            self.assertEqual(len(calls), 3)
+            self.assertFalse(out.exists())
+            self.assertFalse(out.with_name(out.name + '.tmp').exists())
 
     def test_refuses_missing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
