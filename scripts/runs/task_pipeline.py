@@ -18,14 +18,17 @@ from adk_submission import ModelRegistry
 from google.adk.apps._configs import EventsCompactionConfig
 from google.adk.models.lite_llm import LiteLlm
 from swegemma.config import EvalConfig
+from swegemma.context import SwegemmaContext
 from swegemma.evaluate import Evaluator
 from swegemma.harness.container_setup import _is_wheel_compatible_py313
 from swegemma.models import load_tasks
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from subprocess_eval_setup import install_subprocess_dependencies
-from handoff_llm import (build_handoff_registry, config_fingerprint, submission_aliases,
-                         teacher_rewriter, validate_handoff_args)
+from handoff_llm import (EventRecorder, build_handoff_registry, config_fingerprint,
+                         submission_aliases, teacher_rewriter, validate_handoff_args)
+from handoff_snapshot import read_snapshot, write_snapshot
+from replay_llm import ReplayLlm, verify_replay
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'traces'))
 from langfuse_bridge import push_to_langfuse
@@ -178,6 +181,12 @@ def arguments():
                         'for example claude-haiku-5-5. Needs --provider vllm.')
     p.add_argument('--handoff-after', type=int,
                    help='Agent LLM calls served by the student before the teacher takes over.')
+    p.add_argument('--handoff-stop-after-switch', action='store_true',
+                   help='Run A: stop at the first agent call past --handoff-after and write the '
+                        'snapshot. No Anthropic client or key is used.')
+    p.add_argument('--handoff-resume', type=Path, metavar='SNAPSHOT_DIR',
+                   help='Run B: replay the student side of a run A snapshot, then continue with '
+                        'the teacher. Needs exactly one task.')
     p.add_argument('--handoff-teacher-thinking', choices=('adaptive', 'off'), default='adaptive',
                    help='Haiku thinking during the continuation (use off if the API rejects the '
                         'first post-handoff request).')
@@ -196,10 +205,22 @@ def arguments():
         args.litellm_model = configured_model(args.provider, args.model)
     except ValueError as error:
         p.error(str(error))
-    try:
-        validate_handoff_args(args.provider, args.handoff_teacher_model, args.handoff_after)
-    except ValueError as error:
-        p.error(str(error))
+    if args.handoff_stop_after_switch and args.handoff_resume is not None:
+        p.error('--handoff-stop-after-switch and --handoff-resume are mutually exclusive')
+    if (args.handoff_stop_after_switch or args.handoff_resume is not None) \
+            and args.handoff_teacher_model is None:
+        p.error('--handoff-stop-after-switch and --handoff-resume need --handoff-teacher-model')
+    if args.handoff_stop_after_switch and args.handoff_after is None:
+        p.error('--handoff-stop-after-switch needs --handoff-after')
+    if args.handoff_resume is not None:
+        # The switch point comes from the snapshot; a given --handoff-after is checked in run().
+        if args.handoff_after is not None and args.handoff_after < 1:
+            p.error('--handoff-after must be a positive integer')
+    else:
+        try:
+            validate_handoff_args(args.provider, args.handoff_teacher_model, args.handoff_after)
+        except ValueError as error:
+            p.error(str(error))
     args.handoff = args.handoff_teacher_model is not None
     if args.handoff:
         args.handoff_litellm_model = configured_model('anthropic', args.handoff_teacher_model)
@@ -293,6 +314,8 @@ def arguments():
         if not args.task_ids:
             print('No unfinished tasks remain for this submission and split.', flush=True)
             raise SystemExit(0)
+    if args.handoff_resume is not None and len(args.task_ids) != 1:
+        p.error('--handoff-resume replays one snapshot, so it needs exactly one task')
     if len(args.task_ids) > 1 and any(
         getattr(args, name) is not None for name in ('snapshot', 'graph', 'embeddings', 'wheels')
     ):
@@ -388,7 +411,26 @@ def print_run_config(args, agent_dir):
     )
 
 
-async def run_one(args, working, agent_dir, key, task, index, total, teacher_key=None):
+class RecordingContext(SwegemmaContext):
+    """SwegemmaContext that keeps the run's ADK events, for the run A snapshot and the run B check."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.event_recorder = EventRecorder()
+
+    @property
+    def recorded_events(self) -> list[dict]:
+        return list(self.event_recorder.events)
+
+    def handle_adk_event(self, event, agent_name=None):
+        # swegemma sees each event twice (display plugin, then the runner loop) and dedupes
+        # inside super(), so record first; EventRecorder dedupes by event id.
+        self.event_recorder.record(event)
+        super().handle_adk_event(event, agent_name=agent_name)
+
+
+async def run_one(args, working, agent_dir, key, task, index, total, teacher_key=None,
+                  handoff_snapshot=None):
     paths = args.asset_rows[task.instance_id]
     snapshot, graph = paths['snapshot'], paths['graph']
     embeddings, wheels = paths['embeddings'], paths['wheels']
@@ -415,18 +457,49 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
                           else haiku_request_rewriter
                           if args.litellm_model == 'anthropic/claude-haiku-5-5' else None),
     )
-    proxy.start()
-    teacher_proxy = handoff = None
+    stop_mode = args.handoff_stop_after_switch
+    if handoff_snapshot is None:
+        proxy.start()
+    else:
+        # Run B: the student side is replayed from the snapshot, so no vLLM server runs.
+        proxy.exchanges = list(handoff_snapshot['vllm_exchanges'])
+    teacher_proxy = handoff = recorder = None
     registry = None
     if args.handoff:
-        teacher_proxy = VllmTraceProxy(args.teacher_api_base,
-                                       request_rewriter=teacher_rewriter(args.handoff_teacher_thinking))
-        teacher_proxy.start()
+        if not stop_mode:
+            # Run A builds no teacher proxy, client or key.
+            teacher_proxy = VllmTraceProxy(args.teacher_api_base,
+                                           request_rewriter=teacher_rewriter(args.handoff_teacher_thinking))
+            teacher_proxy.start()
+        switch_after = (handoff_snapshot['handoff']['switch_after']
+                        if handoff_snapshot is not None else args.handoff_after)
+
+        def write_switch_snapshot() -> None:
+            # Runs inside the switch call, before the stop, so the snapshot reflects exactly the
+            # student's turns.
+            write_snapshot(
+                task_logs / 'snapshot',
+                handoff={**handoff.record(), 'task_id': task.instance_id,
+                         **config_fingerprint(agent_dir, args.sandbox)},
+                student_responses=handoff.student_responses(),
+                session_events=recorder.recorded_events,
+                vllm_exchanges=proxy.exchanges,
+                manifest={**config_fingerprint(agent_dir, args.sandbox),
+                          'kaggle_kernel_version': os.getenv('KAGGLE_KERNEL_RUN_TYPE', 'unknown'),
+                          'accelerator': os.getenv('NVIDIA_DEVICE_TYPE', 'unknown')},
+            )
+
         registry, handoff = build_handoff_registry(
-            student_base=proxy.api_base, student_key=key, student_model=args.litellm_model,
-            teacher_base=teacher_proxy.api_base, teacher_key=teacher_key,
-            teacher_model=args.handoff_litellm_model, agent_dir=agent_dir,
-            switch_after=args.handoff_after, reasoning_effort=args.reasoning_effort)
+            student_base=None if handoff_snapshot is not None else proxy.api_base,
+            student_key=key, student_model=args.litellm_model,
+            teacher_base=teacher_proxy.api_base if teacher_proxy is not None else None,
+            teacher_key=teacher_key, teacher_model=args.handoff_litellm_model, agent_dir=agent_dir,
+            switch_after=switch_after, reasoning_effort=args.reasoning_effort,
+            student=(ReplayLlm(model=args.litellm_model,
+                               responses=handoff_snapshot['student_responses'])
+                     if handoff_snapshot is not None else None),
+            stop_at_switch=stop_mode,
+            on_switch=write_switch_snapshot if stop_mode else None)
     config = EvalConfig(
         tasks_path=args.tasks, snapshots_dir=snapshots, submission_dir=agent_dir,
         results_dir=task_logs, graph_dir=str(graph.parent),
@@ -445,7 +518,30 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
     print(f'[{index}/{total}] Running {task.instance_id} with {args.litellm_model}; '
           'workspaces/tests run locally.', flush=True)
     try:
-        result = await Evaluator(config).evaluate_task(task=task, task_index=index, total_tasks=total)
+        evaluator = Evaluator(config)
+        context = None
+        if stop_mode or handoff_snapshot is not None:
+            # Same defaults as Evaluator.evaluate_task builds (evaluate.py:245-256), plus recording.
+            recorder = context = RecordingContext(
+                docker_manager=evaluator.docker, container_id='',
+                problem_statement=task.problem_statement,
+                hints_text=getattr(task, 'hints_text', '') or '', task=task, repo=task.repo,
+                graph_dir=config.graph_dir, embeddings_dir=config.embeddings_dir,
+                budget=config.budget, harness=config.harness)
+        result = await evaluator.evaluate_task(task=task, task_index=index, total_tasks=total,
+                                               context=context)
+        if stop_mode and handoff.stopped:
+            # The snapshot was written at the switch. Nothing else is recorded for a stopped run.
+            summary = {'task_id': task.instance_id, 'stopped_at_switch': True,
+                       'switch_after': handoff.switch_after,
+                       'snapshot': str(task_logs / 'snapshot'), 'tool_calls': result.tool_calls}
+            print(json.dumps(summary), flush=True)
+            return summary
+        if handoff_snapshot is not None:
+            live_events = recorder.recorded_events
+            if not live_events:
+                raise RuntimeError('replay check failed: the resumed run recorded no ADK events')
+            verify_replay(handoff_snapshot['session_events'], live_events)
         (task_results / f'{task.instance_id}.patch').write_text(result.agent_patch or '')
         (task_results / f'{task.instance_id}.json').write_text(
             result.model_dump_json(indent=2, exclude={'trace'}))
@@ -453,6 +549,10 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
                    'test_exit_code': result.test_exit_code,
                    'patch_chars': len(result.agent_patch or ''), 'tool_calls': result.tool_calls,
                    'error': result.error_message}
+        if stop_mode:
+            summary['stopped_at_switch'] = False  # finished before the switch point
+        if handoff_snapshot is not None:
+            summary['replay_verified'] = True
         print(json.dumps(summary), flush=True)
         return summary
     finally:
@@ -525,9 +625,22 @@ async def run(args, working):
     agent_dir = working / 'agent'
     prepare_agent(args, agent_dir)
     print_run_config(args, agent_dir)
-    preflight_model(args, key)
+    snapshot = None
+    if args.handoff_resume is not None:
+        snapshot = read_snapshot(args.handoff_resume, agent_dir=agent_dir, sandbox=args.sandbox)
+        if snapshot['handoff'].get('task_id') != args.task_ids[0]:
+            raise ValueError(f"snapshot is for task {snapshot['handoff'].get('task_id')!r}, "
+                             f"not {args.task_ids[0]!r}")
+        switch_after = snapshot['handoff'].get('switch_after')
+        if not isinstance(switch_after, int) or isinstance(switch_after, bool) or switch_after < 1:
+            raise ValueError('snapshot switch_after must be a positive integer')
+        if args.handoff_after is not None and args.handoff_after != switch_after:
+            raise ValueError(f'--handoff-after {args.handoff_after} differs from the snapshot '
+                             f'switch point {switch_after}')
+    else:
+        preflight_model(args, key)
     teacher_key = None
-    if args.handoff:
+    if args.handoff and not args.handoff_stop_after_switch:
         teacher_key = provider_key('anthropic')
         preflight_model(SimpleNamespace(
             litellm_model=args.handoff_litellm_model, api_base=args.teacher_api_base,
@@ -547,7 +660,8 @@ async def run(args, working):
         try:
             tempfile.tempdir = str(cache_dir)
             summary = await run_one(args, task_working, agent_dir, key,
-                                    tasks[task_id], index, len(args.task_ids), teacher_key)
+                                    tasks[task_id], index, len(args.task_ids), teacher_key,
+                                    handoff_snapshot=snapshot)
         except Exception as error:
             summary = {'task_id': task_id, 'resolved': False, 'error': str(error)}
             print(json.dumps(summary), flush=True)

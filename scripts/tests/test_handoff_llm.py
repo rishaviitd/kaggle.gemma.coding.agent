@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'runs'))
 import handoff_llm as h  # noqa: E402
+import replay_llm as r  # noqa: E402
 from google.adk.models.base_llm import BaseLlm  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
@@ -211,6 +212,56 @@ class RewriterTests(unittest.TestCase):
     def test_unknown_mode_rejected(self):
         with self.assertRaises(ValueError):
             h.teacher_rewriter('sometimes')
+
+
+class EventRecorderTests(unittest.TestCase):
+    class Event:
+        def __init__(self, event_id, partial=None):
+            self.id = event_id
+            self.partial = partial
+
+        def model_dump(self, mode='json'):
+            return {'id': self.id, 'partial': self.partial}
+
+    def test_skips_partials_and_duplicate_ids_and_keeps_order(self):
+        recorder = h.EventRecorder()
+        for event in [self.Event('a', partial=True), self.Event('a'), self.Event('a'),
+                      self.Event('b', partial=False), None, self.Event('c')]:
+            recorder.record(event)
+        self.assertEqual([e['id'] for e in recorder.events], ['a', 'b', 'c'])
+
+    def test_records_plain_dicts_from_model_dump(self):
+        recorder = h.EventRecorder()
+        recorder.record(self.Event('x'))
+        self.assertEqual(recorder.events, [{'id': 'x', 'partial': None}])
+
+
+class StopRegistryTests(unittest.TestCase):
+    def agent_dir(self, tmp):
+        agent = Path(tmp)
+        (agent / 'agent.yaml').write_text('model: alias\n')
+        return agent
+
+    def test_stop_mode_teacher_is_a_stub_that_refuses_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, handoff = h.build_handoff_registry(
+                student=FakeLlm(model='student-model', reply='s'), student_model='openai/gemma4',
+                teacher_model='anthropic/claude-haiku-5-5', agent_dir=self.agent_dir(tmp),
+                switch_after=2, stop_at_switch=True, on_switch=lambda: None)
+        self.assertIsInstance(handoff.teacher, h.StoppedTeacher)
+        self.assertTrue(handoff.stop_at_switch)
+        with self.assertRaisesRegex(RuntimeError, 'stop mode'):
+            call(handoff.teacher, agent_request())
+
+    def test_resume_student_override_is_used_as_given(self):
+        replay = r.ReplayLlm(model='openai/gemma4', responses=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            _, handoff = h.build_handoff_registry(
+                student=replay, teacher_base='http://teacher', teacher_key='k',
+                teacher_model='anthropic/claude-haiku-5-5', student_model='openai/gemma4',
+                agent_dir=self.agent_dir(tmp), switch_after=1)
+        self.assertIs(handoff.student, replay)
+        self.assertNotIsInstance(handoff.teacher, h.StoppedTeacher)
 
 
 if __name__ == '__main__':

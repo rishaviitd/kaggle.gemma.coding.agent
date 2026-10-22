@@ -168,18 +168,58 @@ def submission_aliases(model: str, agent_dir: Path) -> set[str]:
     return aliases
 
 
-def build_handoff_registry(*, student_base, student_key, student_model, teacher_base, teacher_key,
-                           teacher_model, agent_dir: Path, switch_after: int, reasoning_effort=None):
-    """Register one shared HandoffLlm under every alias so call counters are global."""
+class StoppedTeacher(BaseLlm):
+    """Teacher stand-in for run A: no Anthropic client exists, and any call is a bug."""
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        raise RuntimeError('teacher must not be called in stop mode')
+        yield  # pragma: no cover - makes this an async generator
+
+
+class EventRecorder:
+    """Keeps the non-partial ADK events of one run as JSON dicts, once per event id."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+        self._seen: set = set()
+
+    def record(self, event) -> None:
+        if event is None or getattr(event, 'partial', False):
+            return
+        event_id = getattr(event, 'id', None)
+        if event_id is not None:
+            if event_id in self._seen:
+                return
+            self._seen.add(event_id)
+        self.events.append(event.model_dump(mode='json'))
+
+
+def build_handoff_registry(*, student_model, teacher_model, agent_dir: Path, switch_after: int,
+                           student_base=None, student_key=None, teacher_base=None, teacher_key=None,
+                           reasoning_effort=None, student: BaseLlm | None = None,
+                           stop_at_switch: bool = False, on_switch: Callable[[], None] | None = None):
+    """Register one shared HandoffLlm under every alias so call counters are global.
+
+    student overrides the LiteLLM student (run B replays recorded responses). With
+    stop_at_switch the teacher is a StoppedTeacher and no teacher credentials are read.
+    """
     from adk_submission import ModelRegistry
     from google.adk.models.lite_llm import LiteLlm
 
-    extra = {'reasoning_effort': reasoning_effort} if reasoning_effort else {}
-    student = LiteLlm(model=student_model, api_base=student_base, api_key=student_key,
-                      num_retries=2, **extra)
-    teacher = LiteLlm(model=teacher_model, api_base=teacher_base, api_key=teacher_key, num_retries=2)
+    if student is None:
+        extra = {'reasoning_effort': reasoning_effort} if reasoning_effort else {}
+        student = LiteLlm(model=student_model, api_base=student_base, api_key=student_key,
+                          num_retries=2, **extra)
+    if stop_at_switch:
+        teacher = StoppedTeacher(model=teacher_model)
+    else:
+        teacher = LiteLlm(model=teacher_model, api_base=teacher_base, api_key=teacher_key,
+                          num_retries=2)
     handoff = HandoffLlm(model=student_model, student=student, teacher=teacher,
-                         switch_after=switch_after)
+                         switch_after=switch_after, stop_at_switch=stop_at_switch,
+                         on_switch=on_switch)
     models = ModelRegistry()
     for alias in submission_aliases(student_model, agent_dir):
         models.register(alias, handoff)
