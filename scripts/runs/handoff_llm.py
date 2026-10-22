@@ -12,6 +12,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import AsyncGenerator, Callable
 
+from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
@@ -32,20 +33,40 @@ def is_summary_request(llm_request: LlmRequest) -> bool:
     return bool(parts) and (parts[0].text or '').startswith(SUMMARY_PROMPT)
 
 
+class HandoffStop(LlmCallsLimitExceededError):
+    """Raised at the switch in run A so the teacher client is never built.
+
+    Subclasses LlmCallsLimitExceededError: swegemma treats that as a clean episode end and still
+    takes the fallback diff while the sandbox is alive. Any other exception would destroy the
+    workspace first. The message must not match the retry plugin's phrases.
+    """
+
+    def __init__(self, switch_after: int):
+        super().__init__(f'handoff after {switch_after} student calls: teacher not called')
+        self.switch_after = switch_after
+
+
 class HandoffLlm(BaseLlm):
     """Agent calls 1..switch_after go to the student, later ones to the teacher.
 
     Compaction summary calls are not counted. After the first teacher call they go to the
     teacher; before it they raise, so no teacher call is spent on a run that is rejected anyway.
+
+    With stop_at_switch, the first call past switch_after calls on_switch, sets stopped and
+    raises HandoffStop instead of routing to the teacher.
     """
 
     student: BaseLlm
     teacher: BaseLlm
     switch_after: int
+    stop_at_switch: bool = False
+    on_switch: Callable[[], None] | None = None
+    stopped: bool = False
 
     _agent_calls: int = PrivateAttr(default=0)
     _teacher_calls: int = PrivateAttr(default=0)
     _summary_before_handoff: int = PrivateAttr(default=0)
+    _student_responses: list = PrivateAttr(default_factory=list)
 
     def _route(self, llm_request: LlmRequest) -> BaseLlm:
         if is_summary_request(llm_request):
@@ -56,6 +77,11 @@ class HandoffLlm(BaseLlm):
         self._agent_calls += 1
         if self._agent_calls <= self.switch_after:
             return self.student
+        if self.stop_at_switch:
+            if self.on_switch is not None:
+                self.on_switch()
+            self.stopped = True
+            raise HandoffStop(self.switch_after)
         self._teacher_calls += 1
         return self.teacher
 
@@ -66,7 +92,12 @@ class HandoffLlm(BaseLlm):
         # ADK stamps the agent's alias on the request; LiteLlm would send it upstream.
         llm_request.model = target.model
         async for response in target.generate_content_async(llm_request, stream=stream):
+            if target is self.student:
+                self._student_responses.append(response.model_dump(mode='json', exclude_none=True))
             yield response
+
+    def student_responses(self) -> list[dict]:
+        return list(self._student_responses)
 
     def record(self) -> dict:
         return {

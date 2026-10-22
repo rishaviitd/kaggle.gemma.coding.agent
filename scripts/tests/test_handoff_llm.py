@@ -86,6 +86,58 @@ class HandoffLlmTests(unittest.TestCase):
         self.assertFalse(h.is_summary_request(agent_request()))
 
 
+class StopAtSwitchTests(unittest.TestCase):
+    def test_teacher_is_never_called_and_hook_fires_once(self):
+        calls = []
+        student, teacher = FakeLlm(model='student-model', reply='s'), FakeLlm(model='teacher-model', reply='t')
+        llm = h.HandoffLlm(model='student-model', student=student, teacher=teacher, switch_after=2,
+                           stop_at_switch=True, on_switch=lambda: calls.append('switch'))
+        self.assertEqual([call(llm, agent_request()) for _ in range(2)], ['s', 's'])
+        with self.assertRaises(h.HandoffStop):
+            call(llm, agent_request())
+        self.assertEqual(calls, ['switch'])
+        self.assertTrue(llm.stopped)
+        self.assertEqual(teacher.seen_models, [])
+
+    def test_stop_is_an_llm_calls_limit_error_with_a_safe_message(self):
+        from google.adk.agents.invocation_context import LlmCallsLimitExceededError
+        self.assertTrue(issubclass(h.HandoffStop, LlmCallsLimitExceededError))
+        message = str(h.HandoffStop(3)).lower()
+        for phrase in ('rate limit', 'overloaded', 'quota exceeded', '429', '500', '502', '503', '504'):
+            self.assertNotIn(phrase, message)
+        self.assertEqual(h.HandoffStop(3).switch_after, 3)
+
+    def test_stopped_is_false_until_the_stop(self):
+        student, teacher = FakeLlm(model='student-model', reply='s'), FakeLlm(model='teacher-model', reply='t')
+        llm = h.HandoffLlm(model='student-model', student=student, teacher=teacher, switch_after=1,
+                           stop_at_switch=True)
+        self.assertFalse(llm.stopped)
+        call(llm, agent_request())
+        self.assertFalse(llm.stopped)
+
+    def test_without_stop_the_teacher_still_takes_over(self):
+        llm, _, teacher = make(1)
+        self.assertEqual([call(llm, agent_request()) for _ in range(2)], ['s', 't'])
+        self.assertFalse(llm.stopped)
+        self.assertEqual(teacher.seen_models, ['teacher-model'])
+
+
+class StudentResponseTests(unittest.TestCase):
+    def test_student_responses_are_recorded_in_order_and_teacher_ones_are_not(self):
+        llm, _, _ = make(2)
+        for _ in range(3):
+            call(llm, agent_request())
+        responses = llm.student_responses()
+        self.assertEqual(len(responses), 2)
+        self.assertEqual([r['content']['parts'][0]['text'] for r in responses], ['s', 's'])
+
+    def test_returned_list_is_a_copy(self):
+        llm, _, _ = make(2)
+        call(llm, agent_request())
+        llm.student_responses().clear()
+        self.assertEqual(len(llm.student_responses()), 1)
+
+
 class SwitchPointTests(unittest.TestCase):
     def test_one_point_per_bin_and_deterministic(self):
         points = h.draw_switch_points(3, 1, 12, 'seed:task')
