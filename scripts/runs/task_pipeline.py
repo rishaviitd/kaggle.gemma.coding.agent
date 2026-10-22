@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 import litellm
@@ -23,6 +24,8 @@ from swegemma.models import load_tasks
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from subprocess_eval_setup import install_subprocess_dependencies
+from handoff_llm import (build_handoff_registry, config_fingerprint, submission_aliases,
+                         teacher_rewriter, validate_handoff_args)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'traces'))
 from langfuse_bridge import push_to_langfuse
@@ -107,11 +110,7 @@ def build_model_registry(api_base: str, api_key: str, model: str,
                          agent_dir: Path, reasoning_effort: str | None = None) -> ModelRegistry:
     """Register the serving name and submission-declared aliases locally."""
     models = ModelRegistry()
-    aliases = {model}
-    for config_path in agent_dir.rglob('*.yaml'):
-        match = re.search(r'^model:\s*([^\s#]+)', config_path.read_text(), re.MULTILINE)
-        if match:
-            aliases.add(match.group(1).strip('"\''))
+    aliases = submission_aliases(model, agent_dir)
     extra = {'reasoning_effort': reasoning_effort} if reasoning_effort else {}
     for alias in aliases:
         models.register(alias, LiteLlm(
@@ -174,6 +173,14 @@ def arguments():
                    help='Override temperature from the submission sampling config.')
     p.add_argument('--reasoning-effort', choices=('minimal', 'low', 'medium', 'high'),
                    help='Reasoning effort sent to reasoning models (OpenAI provider).')
+    p.add_argument('--handoff-teacher-model',
+                   help='Anthropic model that takes over after --handoff-after agent calls, '
+                        'for example claude-haiku-5-5. Needs --provider vllm.')
+    p.add_argument('--handoff-after', type=int,
+                   help='Agent LLM calls served by the student before the teacher takes over.')
+    p.add_argument('--handoff-teacher-thinking', choices=('adaptive', 'off'), default='adaptive',
+                   help='Haiku thinking during the continuation (use off if the API rejects the '
+                        'first post-handoff request).')
     p.add_argument('--skip-langfuse', action='store_true',
                    help='Do not upload the completed local trace even when Langfuse is configured.')
     p.add_argument('--langfuse-session-id',
@@ -189,6 +196,16 @@ def arguments():
         args.litellm_model = configured_model(args.provider, args.model)
     except ValueError as error:
         p.error(str(error))
+    try:
+        validate_handoff_args(args.provider, args.handoff_teacher_model, args.handoff_after)
+    except ValueError as error:
+        p.error(str(error))
+    args.handoff = args.handoff_teacher_model is not None
+    if args.handoff:
+        args.handoff_litellm_model = configured_model('anthropic', args.handoff_teacher_model)
+        args.teacher_api_base = (os.getenv(PROVIDERS['anthropic']['base_env'])
+                                 or PROVIDERS['anthropic']['default_base'])
+        args.skip_langfuse = True  # mixed-provider traces are not Langfuse-importable
     split_dir = ROOT / 'data' / args.split
     args.tasks = args.tasks or split_dir / 'tasks.jsonl'
     if args.iteration < 1:
@@ -371,7 +388,7 @@ def print_run_config(args, agent_dir):
     )
 
 
-async def run_one(args, working, agent_dir, key, task, index, total):
+async def run_one(args, working, agent_dir, key, task, index, total, teacher_key=None):
     paths = args.asset_rows[task.instance_id]
     snapshot, graph = paths['snapshot'], paths['graph']
     embeddings, wheels = paths['embeddings'], paths['wheels']
@@ -399,12 +416,23 @@ async def run_one(args, working, agent_dir, key, task, index, total):
                           if args.litellm_model == 'anthropic/claude-haiku-5-5' else None),
     )
     proxy.start()
+    teacher_proxy = handoff = None
+    registry = None
+    if args.handoff:
+        teacher_proxy = VllmTraceProxy(args.teacher_api_base,
+                                       request_rewriter=teacher_rewriter(args.handoff_teacher_thinking))
+        teacher_proxy.start()
+        registry, handoff = build_handoff_registry(
+            student_base=proxy.api_base, student_key=key, student_model=args.litellm_model,
+            teacher_base=teacher_proxy.api_base, teacher_key=teacher_key,
+            teacher_model=args.handoff_litellm_model, agent_dir=agent_dir,
+            switch_after=args.handoff_after, reasoning_effort=args.reasoning_effort)
     config = EvalConfig(
         tasks_path=args.tasks, snapshots_dir=snapshots, submission_dir=agent_dir,
         results_dir=task_logs, graph_dir=str(graph.parent),
         embeddings_dir=str(embeddings.parent), wheels_dir=wheels,
-        models=build_model_registry(proxy.api_base, key, args.litellm_model, agent_dir,
-                                    args.reasoning_effort),
+        models=registry or build_model_registry(proxy.api_base, key, args.litellm_model, agent_dir,
+                                                args.reasoning_effort),
         task_ids=[task.instance_id], sandbox=args.sandbox, image='swebench-sandbox:latest',
         max_tool_calls=args.max_tool_calls, max_time_minutes=args.max_minutes,
         timeout_seconds=args.timeout_seconds, max_turns=args.max_turns,
@@ -429,6 +457,14 @@ async def run_one(args, working, agent_dir, key, task, index, total):
         return summary
     finally:
         proxy.stop()
+        if teacher_proxy is not None:
+            teacher_proxy.stop()
+            task_logs.mkdir(parents=True, exist_ok=True)
+            (task_logs / 'anthropic_exchanges.json').write_text(
+                json.dumps(teacher_proxy.exchanges, indent=2) + '\n')
+            (task_logs / 'handoff.json').write_text(json.dumps({
+                **handoff.record(), **config_fingerprint(agent_dir, args.sandbox),
+                'teacher_thinking': args.handoff_teacher_thinking}, indent=2) + '\n')
         final = {'result': result.model_dump(
             mode='json', exclude={'trace', 'test_output'}) if 'result' in locals() else None}
         task_logs.mkdir(parents=True, exist_ok=True)
@@ -490,6 +526,12 @@ async def run(args, working):
     prepare_agent(args, agent_dir)
     print_run_config(args, agent_dir)
     preflight_model(args, key)
+    teacher_key = None
+    if args.handoff:
+        teacher_key = provider_key('anthropic')
+        preflight_model(SimpleNamespace(
+            litellm_model=args.handoff_litellm_model, api_base=args.teacher_api_base,
+            provider='anthropic'), teacher_key)
     args.logs.mkdir(parents=True, exist_ok=True)
     for index, task_id in enumerate(args.task_ids, start=1):
         task_logs = args.logs / task_id
@@ -505,7 +547,7 @@ async def run(args, working):
         try:
             tempfile.tempdir = str(cache_dir)
             summary = await run_one(args, task_working, agent_dir, key,
-                                    tasks[task_id], index, len(args.task_ids))
+                                    tasks[task_id], index, len(args.task_ids), teacher_key)
         except Exception as error:
             summary = {'task_id': task_id, 'resolved': False, 'error': str(error)}
             print(json.dumps(summary), flush=True)
