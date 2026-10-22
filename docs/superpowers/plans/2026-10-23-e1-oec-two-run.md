@@ -208,7 +208,7 @@ git commit -m "feat: add handoff snapshot writer and validating reader"
 **Interfaces:**
 - Consumes: `HandoffLlm(student, teacher, switch_after)` as today.
 - Produces:
-  - `class HandoffStop(Exception)` carrying `switch_after`.
+  - `class HandoffStop(LlmCallsLimitExceededError)` (from `google.adk.agents.invocation_context`). It must subclass that error: swegemma's `run_agent_sandbox` swallows any other exception and destroys the sandbox, but it catches this one, takes the fallback diff while the sandbox is alive, and returns normally (spike notes `2026-10-23-e1-oec-two-run-spike.md`, Answer 2). The message must avoid `rate limit`, `overloaded`, `quota exceeded` and 429/5xx codes (retry plugin).
   - `HandoffLlm` new private attributes: `_student_responses: list[dict]` (serialized `LlmResponse`s), and new optional field `stop_at_switch: bool = False`, and `on_switch: Callable[[], None] | None = None`.
   - `HandoffLlm.student_responses() -> list[dict]`.
   - Behaviour: on the call that would be teacher call 1 (agent call `switch_after + 1`), if `stop_at_switch`, call `on_switch()` then raise `HandoffStop`. The teacher is never called.
@@ -250,7 +250,7 @@ Expected: the new tests FAIL (`HandoffStop` undefined, `student_responses` missi
 - [ ] **Step 3: Implement**
 
 In `scripts/runs/handoff_llm.py`:
-- Add `class HandoffStop(Exception)` with a docstring: raised at the switch in run A so the teacher client is never built.
+- Add `class HandoffStop(LlmCallsLimitExceededError)` with a docstring: raised at the switch in run A so the teacher is never called. Check the base class's constructor signature first and pass what it needs. Also set `self.stopped = True` on the `HandoffLlm` (public bool, default False) before raising, because swegemma will report the stop as `Agent exceeded turns budget`.
 - Add the fields `stop_at_switch: bool = False` and `on_switch: Callable[[], None] | None = None`, and `_student_responses: list = PrivateAttr(default_factory=list)`.
 - In `_route`, before returning the teacher for agent call `switch_after + 1` when `stop_at_switch` is set: call `self.on_switch()` if set, then `raise HandoffStop()`.
 - In `generate_content_async`, when the target is the student, iterate responses and append `response.model_dump(mode='json', exclude_none=True)` to `_student_responses` before yielding.
@@ -483,14 +483,15 @@ In `arguments()` add:
 - [ ] **Step 4: Implement run A (stop) in `run_one`**
 
 - When `args.handoff_stop_after_switch`, build the handoff registry as today, but pass `stop_at_switch=True` and `on_switch=lambda: switch_state.update(events=session_events())` where `session_events` is the Task 1 finding. Do not construct `teacher_proxy` or `teacher_key`.
-- Catch `HandoffStop` around `Evaluator.evaluate_task`. Write the snapshot with `write_snapshot(args.logs / task_id / 'snapshot', handoff=handoff.record() | config_fingerprint(agent_dir, args.sandbox), student_responses=handoff.student_responses(), session_events=..., vllm_exchanges=proxy.exchanges, manifest=...)`. The manifest is `config_fingerprint(...)` plus `kaggle_kernel_version` and `accelerator` read from environment variables `KAGGLE_KERNEL_RUN_TYPE` and `NVIDIA_DEVICE_TYPE` if present, else `unknown`. Record the accelerator the kernel reports in `gen_student.py` (Task 9) rather than guessing here.
-- The `run()` loop must treat a `HandoffStop` as a stopped task, not a failure: skip the `result_path` write.
+- Do NOT catch `HandoffStop` around `evaluate_task` (it never reaches there; swegemma turns it into a normal `TaskResult`). Instead the `on_switch` closure writes the snapshot itself, inside the model call while the sandbox is alive. After `evaluate_task` returns, check `handoff.stopped`. Write the snapshot with `write_snapshot(args.logs / task_id / 'snapshot', handoff=handoff.record() | config_fingerprint(agent_dir, args.sandbox), student_responses=handoff.student_responses(), session_events=..., vllm_exchanges=proxy.exchanges, manifest=...)`. The manifest is `config_fingerprint(...)` plus `kaggle_kernel_version` and `accelerator` read from environment variables `KAGGLE_KERNEL_RUN_TYPE` and `NVIDIA_DEVICE_TYPE` if present, else `unknown`. Record the accelerator the kernel reports in `gen_student.py` (Task 9) rather than guessing here.
+- When `handoff.stopped` is true after `evaluate_task`, the result is a stopped task, not a failure or a resolution: skip the `result_path` write and the `resolved` summary. `verify_task` will already have run on the captured diff; that is accepted cost.
+- Events: build a `RecordingContext(SwegemmaContext)` whose `handle_adk_event` appends each non-partial event (as a dict via `model_dump(mode='json')`) to a list before calling `super()`. Construct it as `evaluate.py:244-256` does (use `Evaluator(config).docker` as `docker_manager`), pass it as `context=` to `evaluate_task`, and read the list in `on_switch` (run A) and after the run (run B). Read `.venv/lib/python3.12/site-packages/swegemma/evaluate.py:221-256` and `harness/agent_runner.py:378-382,521-528` first.
 
 - [ ] **Step 5: Implement run B (resume) in `run_one`**
 
 - When `args.handoff_resume` is set: `snapshot = read_snapshot(args.handoff_resume, agent_dir=agent_dir, sandbox=args.sandbox)`; check `snapshot['handoff']['switch_after']` is a positive int and `args.handoff_after` equals it if given.
 - Build the registry with `student=ReplayLlm(model=args.litellm_model, responses=snapshot['student_responses'])` and the Haiku teacher as in today's teacher branch. Use `HandoffLlm(student=ReplayLlm(...), teacher=..., switch_after=snapshot['handoff']['switch_after'])`. Build the registry with the same `build_handoff_registry` path by passing a `student_factory` argument, or inline the construction; keep `submission_aliases` registration unchanged.
-- After `evaluate_task`, call `verify_replay(snapshot['session_events'], live_events)`. Live events come from the same session call that Task 1 identified. If it cannot be reached, fail the run with a clear message rather than skipping the check.
+- After `evaluate_task`, call `verify_replay(snapshot['session_events'], live_events)`. Live events come from the `RecordingContext` list described above. If the list is empty, fail the run with a clear message rather than skipping the check.
 - Copy `snapshot['vllm_exchanges']` to `task_logs / 'vllm_exchanges.json'` so `export_oec` finds the student side. Write `anthropic_exchanges.json` and `handoff.json` as today.
 - Remove the vLLM student proxy from the resume path: `proxy` is not started.
 
