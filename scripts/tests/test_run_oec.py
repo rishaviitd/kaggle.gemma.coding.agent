@@ -233,6 +233,31 @@ class EndpointPoolTests(unittest.TestCase):
         self.assertEqual(pool.available, 4)
 
 
+class TemperatureTests(unittest.TestCase):
+    def args_for(self, stage, temperature=None):
+        extra = {'handoff_snapshot': Path('/tmp/snap')} if stage == 'teacher' else {}
+        if stage == 'teacher':
+            extra['sandbox'] = 'subprocess'
+        fields = dict(STAGE_ARGS, **extra)
+        return SimpleNamespace(stage=stage, temperature=temperature, **fields)
+
+    def test_temperature_is_forwarded_exactly_in_every_stage(self):
+        for stage in (None, 'student', 'teacher'):
+            for value, rendered in ((1.0, '1.0'), (0.7, '0.7')):
+                with self.subTest(stage=stage, temperature=value):
+                    command = oec.command_for(STAGE_JOB, self.args_for(stage, value))
+                    self.assertEqual(command[command.index('--temperature') + 1], rendered)
+                    self.assertEqual(command.count('--temperature'), 1)
+
+    def test_temperature_is_absent_by_default_in_every_stage(self):
+        for stage in (None, 'student', 'teacher'):
+            with self.subTest(stage=stage):
+                self.assertNotIn('--temperature', oec.command_for(STAGE_JOB, self.args_for(stage)))
+
+    def test_namespace_without_temperature_attribute_still_works(self):
+        self.assertNotIn('--temperature', oec.command_for(STAGE_JOB, SimpleNamespace(**STAGE_ARGS)))
+
+
 class DefaultConcurrencyTests(unittest.TestCase):
     def test_default_per_endpoint_spreads_workers_across_endpoints(self):
         self.assertEqual(oec.resolve_jobs_per_endpoint(4, ['u0']), 4)

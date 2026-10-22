@@ -109,6 +109,10 @@ def command_for(job: dict, args, api_base: str | None = None) -> list[str]:
         command += ['--handoff-after', str(job['switch_after'])]
         if stage == 'student':
             command.append('--handoff-stop-after-switch')
+    temperature = getattr(args, 'temperature', None)
+    if temperature is not None:
+        # Student and teacher must share the sampling config, or agent_config_sha256 differs.
+        command += ['--temperature', str(temperature)]
     return command + ['--sandbox', args.sandbox, '--skip-langfuse']
 
 
@@ -189,6 +193,8 @@ def main():
                         '--handoff-snapshot and finish with Haiku. Default: the full run.')
     p.add_argument('--handoff-snapshot', type=Path,
                    help='Snapshot dir from a student stage run (teacher stage only; one task)')
+    p.add_argument('--temperature', type=float, default=None,
+                   help='Forwarded to every stage; student and teacher must use the same value')
     p.add_argument('--dry-run', action='store_true', help='Print the plan and exit')
     args = p.parse_args()
 
