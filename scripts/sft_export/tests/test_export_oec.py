@@ -111,6 +111,15 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(reasoning, ['think one', None, 'think two'])  # first message of each student group
         self.assertTrue(all('reasoning' not in m for m in assistants[3:]))
 
+    def test_missing_student_reasoning_is_rejected(self):
+        exchanges = vllm_exchanges()
+        exchanges[1]['response']['choices'][0]['message'].pop('reasoning')
+        with tempfile.TemporaryDirectory() as tmp:
+            task = write_run(Path(tmp))
+            (task / 'vllm_exchanges.json').write_text(json.dumps(exchanges))
+            with self.assertRaisesRegex(oec.OecRejected, 'student reasoning missing'):
+                oec.build_oec_examples(task)
+
     def test_rejections(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

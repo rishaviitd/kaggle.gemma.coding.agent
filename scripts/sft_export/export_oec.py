@@ -44,6 +44,16 @@ def student_reasoning_by_call_id(student_exchanges):
     return found
 
 
+def count_student_groups(row):
+    """Number of contiguous runs of student (turn 0) assistant messages."""
+    groups, previous = 0, False
+    for m in row['messages']:
+        current = m.get('role') == 'assistant' and m.get('_turn') == 0
+        groups += current and not previous
+        previous = current
+    return groups
+
+
 def attach_student_reasoning(row, by_call_id):
     """Put reasoning on the first assistant message of each student (turn 0) response group."""
     messages, attached, i = row['messages'], 0, 0
@@ -87,7 +97,10 @@ def build_oec_examples(task_dir: Path, *, policy='none', max_messages=512):
         if reason:
             raise OecRejected(reason)
         if segment == 1:
-            attach_student_reasoning(row, by_call_id)
+            groups = count_student_groups(row)
+            attached = attach_student_reasoning(row, by_call_id)
+            if attached < groups:
+                raise OecRejected(f'student reasoning missing for {groups - attached} of {groups} student turns')
         for example in export_sft.build_examples(
                 row, mode='trajectory', task_id=task_id, segment=segment, enable_thinking=True,
                 max_messages=max_messages, max_chars=NO_CLIP, observation_policy=policy):
