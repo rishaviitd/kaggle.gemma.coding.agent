@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import sys
 import tempfile
 import unittest
@@ -137,6 +138,38 @@ class StudentResponseTests(unittest.TestCase):
         call(llm, agent_request())
         llm.student_responses().clear()
         self.assertEqual(len(llm.student_responses()), 1)
+
+
+class SharedStateAcrossCopiesTests(unittest.TestCase):
+    """ADK/pydantic copies the registered model; the running copy must report to the original."""
+
+    def check_copy_shares_state(self, copier):
+        llm, _, _ = make(3)
+        running = copier(llm)
+        call(running, agent_request())
+        call(running, agent_request())
+        self.assertEqual(llm.record()['agent_calls'], 2)
+        self.assertEqual(len(llm.student_responses()), 2)
+
+    def test_deepcopy_shares_state_with_the_original(self):
+        self.check_copy_shares_state(copy.deepcopy)
+
+    def test_model_copy_deep_shares_state_with_the_original(self):
+        self.check_copy_shares_state(lambda m: m.model_copy(deep=True))
+
+    def test_model_copy_shallow_shares_state_with_the_original(self):
+        self.check_copy_shares_state(lambda m: m.model_copy())
+
+    def test_stop_through_a_copy_sets_the_original_stopped(self):
+        student, teacher = FakeLlm(model='student-model', reply='s'), FakeLlm(model='teacher-model', reply='t')
+        llm = h.HandoffLlm(model='student-model', student=student, teacher=teacher, switch_after=1,
+                           stop_at_switch=True)
+        running = copy.deepcopy(llm)
+        call(running, agent_request())
+        with self.assertRaises(h.HandoffStop):
+            call(running, agent_request())
+        self.assertTrue(llm.stopped)
+        self.assertTrue(running.stopped)
 
 
 class SwitchPointTests(unittest.TestCase):

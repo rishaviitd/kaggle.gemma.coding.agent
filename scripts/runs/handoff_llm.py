@@ -16,7 +16,7 @@ from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
-from pydantic import PrivateAttr
+from pydantic import ConfigDict, Field
 
 SUMMARY_PROMPT = 'The following is a conversation history between a user and an AI agent.'
 
@@ -46,6 +46,27 @@ class HandoffStop(LlmCallsLimitExceededError):
         self.switch_after = switch_after
 
 
+class HandoffState:
+    """Mutable run state shared by every copy of a HandoffLlm.
+
+    ADK and pydantic copy the registered model when an agent runs. Copies return this same
+    object, so the registered instance sees the counters and responses of the running one.
+    """
+
+    def __init__(self) -> None:
+        self.agent_calls = 0
+        self.teacher_calls = 0
+        self.summary_before_handoff = 0
+        self.student_responses: list[dict] = []
+        self.stopped = False
+
+    def __copy__(self) -> 'HandoffState':
+        return self
+
+    def __deepcopy__(self, memo) -> 'HandoffState':
+        return self
+
+
 class HandoffLlm(BaseLlm):
     """Agent calls 1..switch_after go to the student, later ones to the teacher.
 
@@ -56,33 +77,35 @@ class HandoffLlm(BaseLlm):
     raises HandoffStop instead of routing to the teacher.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     student: BaseLlm
     teacher: BaseLlm
     switch_after: int
     stop_at_switch: bool = False
     on_switch: Callable[[], None] | None = None
-    stopped: bool = False
+    state: HandoffState = Field(default_factory=HandoffState)
 
-    _agent_calls: int = PrivateAttr(default=0)
-    _teacher_calls: int = PrivateAttr(default=0)
-    _summary_before_handoff: int = PrivateAttr(default=0)
-    _student_responses: list = PrivateAttr(default_factory=list)
+    @property
+    def stopped(self) -> bool:
+        return self.state.stopped
 
     def _route(self, llm_request: LlmRequest) -> BaseLlm:
+        state = self.state
         if is_summary_request(llm_request):
-            if self._teacher_calls == 0:
-                self._summary_before_handoff += 1
+            if state.teacher_calls == 0:
+                state.summary_before_handoff += 1
                 raise RuntimeError('compaction before handoff: run rejected')
             return self.teacher
-        self._agent_calls += 1
-        if self._agent_calls <= self.switch_after:
+        state.agent_calls += 1
+        if state.agent_calls <= self.switch_after:
             return self.student
         if self.stop_at_switch:
             if self.on_switch is not None:
                 self.on_switch()
-            self.stopped = True
+            state.stopped = True
             raise HandoffStop(self.switch_after)
-        self._teacher_calls += 1
+        state.teacher_calls += 1
         return self.teacher
 
     async def generate_content_async(
@@ -93,19 +116,19 @@ class HandoffLlm(BaseLlm):
         llm_request.model = target.model
         async for response in target.generate_content_async(llm_request, stream=stream):
             if target is self.student:
-                self._student_responses.append(response.model_dump(mode='json', exclude_none=True))
+                self.state.student_responses.append(response.model_dump(mode='json', exclude_none=True))
             yield response
 
     def student_responses(self) -> list[dict]:
-        return list(self._student_responses)
+        return list(self.state.student_responses)
 
     def record(self) -> dict:
         return {
             'switch_after': self.switch_after,
-            'agent_calls': self._agent_calls,
-            'student_calls': min(self._agent_calls, self.switch_after),
-            'teacher_calls': self._teacher_calls,
-            'summary_calls_before_handoff': self._summary_before_handoff,
+            'agent_calls': self.state.agent_calls,
+            'student_calls': min(self.state.agent_calls, self.switch_after),
+            'teacher_calls': self.state.teacher_calls,
+            'summary_calls_before_handoff': self.state.summary_before_handoff,
             'student_model': self.student.model,
             'teacher_model': self.teacher.model,
         }
