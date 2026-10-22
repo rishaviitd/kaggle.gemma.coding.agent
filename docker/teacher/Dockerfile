@@ -16,7 +16,13 @@
 #     the build context is docker/teacher only. The uv cache is a volume so later runs are fast.
 #   - Repo wheelhouse (adk_eval_core, adk_submission, swegemma) installed --no-deps from
 #     /repo/wheelhouse at container start, because the repo is mounted and not copied.
+#     A missing lock file or wheelhouse is a hard error when a repo checkout is mounted.
 #   - gen_dry's import check and its CPU torch / transformers fallback.
+#
+# Runtime behaviour set by the wrapper (scripts/runs/run_teacher_docker.sh):
+#   - HOST_UID/HOST_GID: on exit the entrypoint chowns /repo/logs back to the host user (best effort).
+#   - /dev/null is bind-mounted over /repo/.env (only when the host has one) so task_pipeline's
+#     load_dotenv() sees nothing; the Anthropic key comes from the shell by name.
 #
 # Not reproduced (Kaggle-only, GPU, or serving; the student side is replayed from the snapshot in run B):
 #   - The pinned Kaggle competition image and its OS packages (see UNVERIFIED above).
@@ -51,33 +57,57 @@ ENV PATH=/opt/h313/bin:/usr/local/bin:/usr/bin:/bin
 
 COPY --chmod=0755 <<'EOF' /usr/local/bin/oec-teacher-entrypoint
 #!/bin/sh
-# Container start: install the harness env (mirrors gen_dry.py install_py313_harness), then exec the command.
+# Container start: install the harness env (mirrors gen_dry.py install_py313_harness), run the
+# command, then restore host ownership of /repo/logs.
 set -eu
 PY=/opt/h313/bin/python
 REPO=/repo
 HARNESS_DEPS="google-adk==1.36.1 litellm python-dotenv pyyaml requests cachetools docker google-genai networkx numpy pydantic rich pandas tokenizers"
 CHECK="import sys; sys.path[:0] = ['scripts/runs', 'scripts/traces']; import task_pipeline, run_oec, handoff_llm; from importlib import metadata; print('IMPORT_OK', sys.version.split()[0], metadata.version('swegemma'), metadata.version('adk_submission'), metadata.version('google-adk'), metadata.version('litellm'))"
 
-if [ -f "$REPO/requirements.lock.txt" ]; then
+restore_ownership() {
+    rc=$?
+    # Best effort: never change the exit status. Only /repo/logs is touched, and -h changes
+    # symlinks themselves rather than their targets.
+    if [ -n "${HOST_UID:-}" ] && [ -n "${HOST_GID:-}" ] && [ -d "$REPO/logs" ] && [ ! -L "$REPO/logs" ]; then
+        chown -R -h "$HOST_UID:$HOST_GID" "$REPO/logs" 2>/dev/null \
+            || echo "warning: could not restore ownership of $REPO/logs" >&2
+    fi
+    exit "$rc"
+}
+trap restore_ownership EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ ! -d "$REPO/scripts/runs" ]; then
+    echo "oec-teacher: no repo checkout mounted at $REPO; skipping harness setup" >&2
+else
+    if [ ! -f "$REPO/requirements.lock.txt" ]; then
+        echo "oec-teacher: $REPO/requirements.lock.txt is missing; refusing to install harness deps unpinned" >&2
+        exit 2
+    fi
+    if ! ls "$REPO"/wheelhouse/*.whl >/dev/null 2>&1; then
+        echo "oec-teacher: no wheels in $REPO/wheelhouse; cannot install the repo harness" >&2
+        exit 2
+    fi
+
     grep -v -E '^(\./|#)' "$REPO/requirements.lock.txt" | grep -v -E '^[[:space:]]*$' > /tmp/constraints.txt
     if ! uv pip install --python "$PY" -c /tmp/constraints.txt $HARNESS_DEPS; then
         echo "constrained install failed; retrying unconstrained" >&2
         uv pip install --python "$PY" $HARNESS_DEPS
     fi
-fi
 
-if ls "$REPO"/wheelhouse/*.whl >/dev/null 2>&1; then
     uv pip install --python "$PY" --no-deps --reinstall "$REPO"/wheelhouse/*.whl
+
+    if ! (cd "$REPO" && "$PY" -c "$CHECK"); then
+        echo "import check failed; adding transformers/accelerate/safetensors and CPU torch" >&2
+        uv pip install --python "$PY" --index-url https://download.pytorch.org/whl/cpu torch torchvision || true
+        uv pip install --python "$PY" transformers accelerate safetensors
+        (cd "$REPO" && "$PY" -c "$CHECK")
+    fi
 fi
 
-if [ -d "$REPO/scripts/runs" ] && ! (cd "$REPO" && "$PY" -c "$CHECK"); then
-    echo "import check failed; adding transformers/accelerate/safetensors and CPU torch" >&2
-    uv pip install --python "$PY" --index-url https://download.pytorch.org/whl/cpu torch torchvision || true
-    uv pip install --python "$PY" transformers accelerate safetensors
-    (cd "$REPO" && "$PY" -c "$CHECK")
-fi
-
-exec "$@"
+"$@"
 EOF
 
 ENTRYPOINT ["/usr/local/bin/oec-teacher-entrypoint"]
