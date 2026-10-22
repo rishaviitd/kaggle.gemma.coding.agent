@@ -37,10 +37,22 @@ def has_pytest_wheel(directory: Path | None) -> bool:
                for path in directory.iterdir())
 
 
+def is_shared(task_dir: Path, shared_dir: Path | None) -> bool:
+    """True when the task dir resolves to, or inside, the shared wheel dir (e.g. a symlink)."""
+    if shared_dir is None:
+        return False
+    resolved = task_dir.resolve()
+    return resolved == shared_dir.resolve() or resolved.is_relative_to(shared_dir.resolve())
+
+
 def choose_wheel_dir(task_dir: Path | None, shared_dir: Path | None) -> tuple[Path | None, str]:
-    """Prefer the task's own wheel cache, then the shared wheels; both need pytest."""
+    """Prefer the task's own wheel cache, then the shared wheels; both need pytest.
+
+    A task dir that is a symlink into the shared dir is reported as 'shared', since
+    that is what the child actually installs from.
+    """
     if has_pytest_wheel(task_dir):
-        return task_dir, 'task-cache'
+        return task_dir, 'shared' if is_shared(task_dir, shared_dir) else 'task-cache'
     if has_pytest_wheel(shared_dir):
         return shared_dir, 'shared'
     return None, 'none'
@@ -153,7 +165,7 @@ def preflight_task(task_id: str, shared_dir: Path | None, root: Path = ROOT,
                 return failure(task_id, f'unreadable child result: {error}', source, elapsed())
             result['seconds'] = elapsed()
             return result
-        output = (completed.stderr or completed.stdout or '').strip()[-200:]
+        output = (completed.stderr or completed.stdout or '').strip()[-600:]
         return failure(task_id, f'exit {completed.returncode}: {output}', source, elapsed())
 
 

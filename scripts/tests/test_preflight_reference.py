@@ -50,6 +50,37 @@ class ChooseWheelDirTests(unittest.TestCase):
             self.assertEqual(preflight.choose_wheel_dir(task, shared), (None, 'none'))
             self.assertEqual(preflight.choose_wheel_dir(None, None), (None, 'none'))
 
+    def test_symlinked_task_dir_into_shared_reports_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = make_wheels(root / 'shared')
+            task = root / 'task'
+            task.symlink_to(shared, target_is_directory=True)
+            self.assertEqual(preflight.choose_wheel_dir(task, shared), (task, 'shared'))
+
+    def test_task_dir_inside_shared_reports_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = make_wheels(root / 'shared')
+            nested = make_wheels(shared / 'sub')
+            self.assertEqual(preflight.choose_wheel_dir(nested, shared), (nested, 'shared'))
+
+    def test_real_task_dir_with_pytest_is_task_cache_even_with_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = make_wheels(root / 'shared')
+            task = make_wheels(root / 'task')
+            self.assertEqual(preflight.choose_wheel_dir(task, shared), (task, 'task-cache'))
+
+    def test_dangling_symlink_task_dir_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = make_wheels(root / 'shared')
+            task = root / 'task'
+            task.symlink_to(root / 'missing', target_is_directory=True)
+            self.assertEqual(preflight.choose_wheel_dir(task, shared), (shared, 'shared'))
+            self.assertEqual(preflight.choose_wheel_dir(task, None), (None, 'none'))
+
     def test_pytest_must_be_a_wheel_name_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
