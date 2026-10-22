@@ -76,6 +76,13 @@ class AuditTests(unittest.TestCase):
     def test_oec_row_must_have_masked_student_and_trained_teacher(self):
         self.assertTrue(any('student' in p for p in audit.audit([row('oec', student_trains=True)])))
 
+    def test_trained_spans_must_be_a_contiguous_suffix(self):
+        bad = row('oec')
+        # masked, trained, masked, trained: a masked turn follows a trained one
+        extra = {'role': 'assistant', 'content': 'again', 'train': False}
+        bad['messages'].insert(-1, extra)
+        self.assertTrue(any('leaked' in p for p in audit.audit([bad])))
+
     def test_missing_reasoning_on_a_tool_call_step(self):
         bad = row('clean')
         del bad['messages'][2]['reasoning']

@@ -51,8 +51,8 @@ def audit(rows):
             if not any(m.get('train') for m in assistants):
                 problems.append(f'{label}: OEC row has no trained teacher turn')
             first_trained = next((i for i, m in enumerate(assistants) if m.get('train')), None)
-            if first_trained is not None and any(m.get('train') for m in assistants[:first_trained]):
-                problems.append(f'{label}: student turn is trained')
+            if first_trained is not None and any(not m.get('train') for m in assistants[first_trained + 1:]):
+                problems.append(f'{label}: masked turn after a trained turn (student turn leaked into the loss span)')
     return problems
 
 
