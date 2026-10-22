@@ -41,18 +41,25 @@ def tool_results(events: list[dict]) -> list[dict]:
     return results
 
 
-def _strip_timing(value):
-    if isinstance(value, dict):
-        return {k: _strip_timing(v) for k, v in value.items() if k not in TIMING_KEYS}
-    if isinstance(value, list):
-        return [_strip_timing(v) for v in value]
-    return value
+def _strip_timing(response):
+    """Drop timing keys at the top level of a tool response only; nested keys still count."""
+    if isinstance(response, dict):
+        return {k: v for k, v in response.items() if k not in TIMING_KEYS}
+    return response
 
 
 def verify_replay(recorded_events: list[dict], live_events: list[dict]) -> None:
+    """Check the live run reproduced the snapshot's tool results.
+
+    The live run may continue past the recorded prefix (teacher turns), so only the
+    first len(snapshot) live results are compared.
+    """
     expected, actual = tool_results(recorded_events), tool_results(live_events)
-    for index, (want, got) in enumerate(zip(expected, actual)):
+    if len(actual) < len(expected):
+        raise ValueError(
+            f'replay stopped early: snapshot has {len(expected)} tool results, live has {len(actual)}')
+    for index, want in enumerate(expected):
+        got = actual[index]
         if want != got:
-            raise ValueError(f'tool result {index} differs from the snapshot: {want!r} != {got!r}')
-    if len(expected) != len(actual):
-        raise ValueError(f'tool result count differs: snapshot {len(expected)}, live {len(actual)}')
+            raise ValueError(
+                f'tool result {index} ({want["name"]}) differs from the snapshot: {want!r} != {got!r}')

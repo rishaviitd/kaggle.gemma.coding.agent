@@ -68,6 +68,29 @@ class ReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'tool result 0'):
             r.verify_replay(recorded_events, live_events)
 
+    def test_verify_passes_when_live_continues_past_the_snapshot(self):
+        recorded_events = [fn_event('bash', {'stdout': 'x'})]
+        live_events = [fn_event('bash', {'stdout': 'x'}), fn_event('bash', {'stdout': 'teacher'})]
+        r.verify_replay(recorded_events, live_events)
+
+    def test_verify_raises_when_live_stops_early(self):
+        recorded_events = [fn_event('bash', {'stdout': 'x'}), fn_event('bash', {'stdout': 'y'})]
+        live_events = [fn_event('bash', {'stdout': 'x'})]
+        with self.assertRaisesRegex(ValueError, 'replay stopped early'):
+            r.verify_replay(recorded_events, live_events)
+
+    def test_verify_flags_nested_duration_difference(self):
+        recorded_events = [fn_event('bash', {'result': {'duration': 5}})]
+        live_events = [fn_event('bash', {'result': {'duration': 9}})]
+        with self.assertRaisesRegex(ValueError, 'tool result 0'):
+            r.verify_replay(recorded_events, live_events)
+
+    def test_verify_flags_nested_time_difference(self):
+        recorded_events = [fn_event('bash', {'result': {'time': 1}})]
+        live_events = [fn_event('bash', {'result': {'time': 2}})]
+        with self.assertRaisesRegex(ValueError, 'tool result 0'):
+            r.verify_replay(recorded_events, live_events)
+
     def test_tool_results_reads_real_adk_event_dump(self):
         event = Event(author='agent', content=types.Content(role='user', parts=[
             types.Part(function_response=types.FunctionResponse(name='bash', response={'stdout': 'x'}))]))
