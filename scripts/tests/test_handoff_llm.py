@@ -56,15 +56,23 @@ class HandoffLlmTests(unittest.TestCase):
         self.assertEqual(student.seen_models, ['student-model', 'student-model'])
         self.assertEqual(teacher.seen_models, ['teacher-model', 'teacher-model'])
 
-    def test_summary_calls_are_not_counted_and_follow_the_current_model(self):
+    def test_summary_before_the_first_teacher_call_raises(self):
+        llm, student, teacher = make(1)
+        self.assertEqual(call(llm, agent_request()), 's')
+        with self.assertRaisesRegex(RuntimeError, 'compaction before handoff'):
+            call(llm, summary_request())
+        self.assertEqual(teacher.seen_models, [])  # no teacher call was made
+        self.assertEqual(llm.record()['summary_calls_before_handoff'], 1)
+        self.assertEqual(llm.record()['agent_calls'], 1)
+
+    def test_summary_after_the_teacher_started_goes_to_the_teacher_uncounted(self):
         llm, _, _ = make(1)
         self.assertEqual(call(llm, agent_request()), 's')
-        self.assertEqual(call(llm, summary_request()), 's')  # still before the first teacher call
         self.assertEqual(call(llm, agent_request()), 't')
         self.assertEqual(call(llm, summary_request()), 't')
         self.assertEqual(llm.record(), {
             'switch_after': 1, 'agent_calls': 2, 'student_calls': 1, 'teacher_calls': 1,
-            'summary_calls_before_handoff': 1,
+            'summary_calls_before_handoff': 0,
             'student_model': 'student-model', 'teacher_model': 'teacher-model'})
 
     def test_run_that_ends_before_the_handoff_has_no_teacher_calls(self):

@@ -35,8 +35,8 @@ def is_summary_request(llm_request: LlmRequest) -> bool:
 class HandoffLlm(BaseLlm):
     """Agent calls 1..switch_after go to the student, later ones to the teacher.
 
-    Compaction summary calls are not counted. They go to the student until the first
-    teacher call has happened, and to the teacher afterwards.
+    Compaction summary calls are not counted. After the first teacher call they go to the
+    teacher; before it they raise, so no teacher call is spent on a run that is rejected anyway.
     """
 
     student: BaseLlm
@@ -51,7 +51,7 @@ class HandoffLlm(BaseLlm):
         if is_summary_request(llm_request):
             if self._teacher_calls == 0:
                 self._summary_before_handoff += 1
-                return self.student
+                raise RuntimeError('compaction before handoff: run rejected')
             return self.teacher
         self._agent_calls += 1
         if self._agent_calls <= self.switch_after:

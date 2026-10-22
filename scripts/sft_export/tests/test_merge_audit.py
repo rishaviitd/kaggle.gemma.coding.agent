@@ -20,11 +20,13 @@ def row(kind, task='t1', system='SYS', tools=TOOLS, student_trains=False):
     messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': 'u'}]
     if kind == 'oec':
         messages += [{'role': 'assistant', 'content': '', 'tool_calls': [call('s')], 'reasoning': 'r',
-                      'train': student_trains},
+                      'train': student_trains, 'source': 'student'},
                      {'role': 'tool', 'content': '{}', 'tool_call_id': 's', 'name': 'run_command'}]
-    messages += [{'role': 'assistant', 'content': '', 'tool_calls': [call('t')], 'reasoning': 'r', 'train': True},
+    messages += [{'role': 'assistant', 'content': '', 'tool_calls': [call('t')], 'reasoning': 'r', 'train': True,
+                  **({'source': 'teacher'} if kind == 'oec' else {})},
                  {'role': 'tool', 'content': '{}', 'tool_call_id': 't', 'name': 'run_command'},
-                 {'role': 'assistant', 'content': 'done', 'train': True}]
+                 {'role': 'assistant', 'content': 'done', 'train': True,
+                  **({'source': 'teacher'} if kind == 'oec' else {})}]
     return {'task_id': task, 'kind': kind, 'mode': 'trajectory', 'enable_thinking': True,
             'tools': tools, 'messages': messages}
 
@@ -60,6 +62,40 @@ class MergeTests(unittest.TestCase):
             self.assertEqual(manifest['schema_version'], 'gemma4-sft-v6')
             self.assertEqual(manifest['oec'], {'sandbox': 'docker'})
 
+    def _dirs(self, base, oec_manifest, clean_extra=None, oec_rows=None):
+        for name, kind, n in [('clean', 'clean', 6), ('oec', 'oec', 10)]:
+            d = base / name
+            d.mkdir()
+            rows = oec_rows if (kind == 'oec' and oec_rows is not None) else [row(kind, task=f't{i}') for i in range(n)]
+            (d / 'train.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+            manifest = oec_manifest if kind == 'oec' else {'schema_version': 'gemma4-sft-v6', 'thoughts': {},
+                                                           **(clean_extra or {})}
+            (d / 'manifest.json').write_text(json.dumps(manifest))
+
+    def test_sandbox_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._dirs(base, {'schema_version': 'gemma4-sft-v6', 'thoughts': {}, 'oec': {'sandbox': 'local'}})
+            with self.assertRaisesRegex(ValueError, 'sandbox mismatch'):
+                merge.merge(base / 'clean', base / 'oec', base / 'out', oec_share=1 / 3, seed=1)
+
+    def test_schema_and_thoughts_are_required(self):
+        for manifest in [{'schema_version': 'gemma4-sft-v5', 'thoughts': {}, 'oec': {'sandbox': 'docker'}},
+                         {'schema_version': 'gemma4-sft-v6', 'oec': {'sandbox': 'docker'}}]:
+            with tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                self._dirs(base, manifest)
+                with self.assertRaisesRegex(ValueError, 'gemma4-sft-v6'):
+                    merge.merge(base / 'clean', base / 'oec', base / 'out', oec_share=1 / 3, seed=1)
+
+    def test_oec_row_with_another_kind_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._dirs(base, {'schema_version': 'gemma4-sft-v6', 'thoughts': {}, 'oec': {'sandbox': 'docker'}},
+                       oec_rows=[row('clean')])
+            with self.assertRaisesRegex(ValueError, 'kind'):
+                merge.merge(base / 'clean', base / 'oec', base / 'out', oec_share=1 / 3, seed=1)
+
 
 class AuditTests(unittest.TestCase):
     def test_consistent_rows_pass(self):
@@ -73,15 +109,22 @@ class AuditTests(unittest.TestCase):
         other = [{'type': 'function', 'function': {'name': 'read_file', 'description': 'x', 'parameters': {}}}]
         self.assertTrue(any('tools' in p for p in audit.audit([row('clean'), row('oec', tools=other)])))
 
-    def test_oec_row_must_have_masked_student_and_trained_teacher(self):
-        self.assertTrue(any('student' in p for p in audit.audit([row('oec', student_trains=True)])))
+    def test_trained_student_turn_fails(self):
+        problems = audit.audit([row('oec', student_trains=True)])
+        self.assertTrue(any('student turn is trained' in p for p in problems))
 
-    def test_trained_spans_must_be_a_contiguous_suffix(self):
+    def test_masked_teacher_step_after_trained_teacher_step_passes(self):
+        # export_sft.mask_unsound_steps masks failed/repeated teacher steps anywhere in the row
+        ok = row('oec')
+        ok['messages'].insert(-1, {'role': 'assistant', 'content': 'retry', 'train': False, 'source': 'teacher'})
+        self.assertEqual(audit.audit([ok]), [])
+
+    def test_oec_row_needs_a_trained_teacher_turn(self):
         bad = row('oec')
-        # masked, trained, masked, trained: a masked turn follows a trained one
-        extra = {'role': 'assistant', 'content': 'again', 'train': False}
-        bad['messages'].insert(-1, extra)
-        self.assertTrue(any('leaked' in p for p in audit.audit([bad])))
+        for m in bad['messages']:
+            if m.get('source') == 'teacher':
+                m['train'] = False
+        self.assertTrue(any('no trained teacher' in p for p in audit.audit([bad])))
 
     def test_missing_reasoning_on_a_tool_call_step(self):
         bad = row('clean')

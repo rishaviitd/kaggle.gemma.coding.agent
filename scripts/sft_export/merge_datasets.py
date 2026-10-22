@@ -43,8 +43,20 @@ def read_rows(directory: Path):
 def merge(clean_dir: Path, oec_dir: Path, out_dir: Path, oec_share: float, seed: int):
     if not 0 < oec_share < 1:
         raise ValueError('oec_share must be strictly between 0 and 1')
+    manifest = json.loads((clean_dir / 'manifest.json').read_text())
+    oec_manifest = json.loads((oec_dir / 'manifest.json').read_text())
+    if oec_manifest.get('schema_version') != 'gemma4-sft-v6' or 'thoughts' not in oec_manifest:
+        raise ValueError('OEC manifest must be schema gemma4-sft-v6 with a thoughts key (run rationalize.py apply first)')
+    oec_sandbox = (oec_manifest.get('oec') or {}).get('sandbox')
+    clean_sandbox = (manifest.get('oec') or {}).get('sandbox') or manifest.get('sandbox') or 'docker'
+    if oec_sandbox != clean_sandbox:
+        raise ValueError(f'sandbox mismatch: clean {clean_sandbox!r} vs OEC {oec_sandbox!r}')
     clean = [{**row, 'kind': 'clean'} for row in read_rows(clean_dir)]
-    oec_pool = read_rows(oec_dir)
+    oec_pool = []
+    for row in read_rows(oec_dir):
+        if row.setdefault('kind', 'oec') != 'oec':
+            raise ValueError(f"OEC input row has kind {row['kind']!r} (task {row.get('task_id')})")
+        oec_pool.append(row)
     want = round(len(clean) * oec_share / (1 - oec_share))
     oec = select_balanced(oec_pool, want, seed)
     rows = clean + oec
@@ -52,8 +64,6 @@ def merge(clean_dir: Path, oec_dir: Path, out_dir: Path, oec_share: float, seed:
     with (out_dir / 'train.jsonl').open('w') as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + '\n')
-    manifest = json.loads((clean_dir / 'manifest.json').read_text())
-    oec_manifest = json.loads((oec_dir / 'manifest.json').read_text())
     manifest.update({
         'schema_version': 'gemma4-sft-v6', 'examples': len(rows),
         'sources': {'clean': len(clean), 'oec': len(oec)},

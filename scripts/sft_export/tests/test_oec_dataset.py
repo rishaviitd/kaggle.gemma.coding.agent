@@ -63,5 +63,19 @@ class RationalizeTests(unittest.TestCase):
         self.assertEqual([j['msg'] for j in jobs], [4])
 
 
+class ApplyGuardTests(unittest.TestCase):
+    def test_apply_refuses_existing_output_and_the_input_file(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            data, out = Path(tmp) / 'in.jsonl', Path(tmp) / 'out.jsonl'
+            data.write_text('')
+            out.write_text('keep')
+            for target in (out, data):
+                args = argparse.Namespace(data=str(data), out=str(target), prompt_version='v5')
+                with self.assertRaises(SystemExit):
+                    rationalize.apply(args)
+            self.assertEqual(out.read_text(), 'keep')
+
+
 if __name__ == '__main__':
     unittest.main()

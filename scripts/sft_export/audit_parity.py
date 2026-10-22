@@ -46,13 +46,12 @@ def audit(rows):
                 problems.append(f'{label}: tool-call step at message {index} has no reasoning')
         if row.get('kind') == 'oec':
             assistants = [m for m in messages if m.get('role') == 'assistant']
-            if not any(not m.get('train') for m in assistants):
-                problems.append(f'{label}: OEC row has no masked student turn')
-            if not any(m.get('train') for m in assistants):
+            if any(m.get('source') == 'student' and m.get('train') for m in assistants):
+                problems.append(f'{label}: a student turn is trained (student turn leaked into the loss span)')
+            if not any(m.get('source') == 'student' for m in assistants):
+                problems.append(f'{label}: OEC row has no student turn marked source=student')
+            if not any(m.get('source') == 'teacher' and m.get('train') for m in assistants):
                 problems.append(f'{label}: OEC row has no trained teacher turn')
-            first_trained = next((i for i, m in enumerate(assistants) if m.get('train')), None)
-            if first_trained is not None and any(not m.get('train') for m in assistants[first_trained + 1:]):
-                problems.append(f'{label}: masked turn after a trained turn (student turn leaked into the loss span)')
     return problems
 
 

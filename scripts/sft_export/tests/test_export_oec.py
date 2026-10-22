@@ -110,6 +110,8 @@ class BuildTests(unittest.TestCase):
         reasoning = [m.get('reasoning') for m in assistants[:3]]
         self.assertEqual(reasoning, ['think one', None, 'think two'])  # first message of each student group
         self.assertTrue(all('reasoning' not in m for m in assistants[3:]))
+        # the explicit boundary survives clip_message and the build
+        self.assertEqual([m['source'] for m in assistants], ['student'] * 3 + ['teacher'] * 2)
 
     def test_missing_student_reasoning_is_rejected(self):
         exchanges = vllm_exchanges()
@@ -119,6 +121,16 @@ class BuildTests(unittest.TestCase):
             (task / 'vllm_exchanges.json').write_text(json.dumps(exchanges))
             with self.assertRaisesRegex(oec.OecRejected, 'student reasoning missing'):
                 oec.build_oec_examples(task)
+
+    def test_student_submit_patch_is_rejected(self):
+        history = [USER, use('s1', 'ls'), result('s1')]
+        history[1]['content'][0]['name'] = 'submit_patch'
+        base = {**BASE, 'tools': [TOOL, {**TOOL, 'name': 'submit_patch'}]}
+        teacher = [{'request': {**base, 'messages': history}, 'response_status': 200,
+                    'response': {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn'}}]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(oec.OecRejected, 'student submitted before the handoff'):
+                oec.build_oec_examples(write_run(Path(tmp), teacher=teacher))
 
     def test_rejections(self):
         with tempfile.TemporaryDirectory() as tmp:

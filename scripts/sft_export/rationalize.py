@@ -229,6 +229,11 @@ def split_at_user_turns(row):
 
 
 def apply(args):
+    dst = Path(args.out)
+    if dst.resolve() == Path(args.data).resolve():
+        raise SystemExit(f"--out is the same file as --data ({dst}); refusing to overwrite the input")
+    if dst.exists():
+        raise SystemExit(f"--out already exists ({dst}); refusing to overwrite it")
     rows = [json.loads(l) for l in open(args.data)]
     thoughts = {}
     for line in open(OUT_DIR / f"thoughts-{args.prompt_version}{TAG}.jsonl"):
@@ -240,7 +245,6 @@ def apply(args):
         raise SystemExit(f"{total - len(thoughts)} tool-call steps have no thought; rerun `run` first")
     for (r, k), t in thoughts.items():
         rows[r]["messages"][k]["reasoning"] = t
-    dst = Path(args.out)
     dst.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     with open(dst, "w") as f:

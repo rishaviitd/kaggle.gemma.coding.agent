@@ -57,6 +57,15 @@ class HandoffTests(unittest.TestCase):
         for handoff, result, word in cases:
             self.assertIn(word, f.handoff_problem(handoff, result))
 
+    def test_student_submit_patch_is_rejected(self):
+        student = {**call('submit_patch'), '_turn': 0}
+        self.assertEqual(f.handoff_problem(self.GOOD, {'resolved': True}, [student]),
+                         'student submitted before the handoff')
+
+    def test_teacher_submit_patch_is_fine(self):
+        teacher = {**call('submit_patch'), '_turn': 1}
+        self.assertIsNone(f.handoff_problem(self.GOOD, {'resolved': True}, [teacher]))
+
 
 if __name__ == '__main__':
     unittest.main()

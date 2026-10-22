@@ -78,11 +78,13 @@ Exact commands are in Task 9 of the implementation plan.
 .venv/bin/python scripts/sft_export/rationalize.py run --tag oec-v1 \
   --data data/transient/oec-v1/trajectory/train.jsonl
 .venv/bin/python scripts/sft_export/rationalize.py apply --tag oec-v1 \
-  --data data/transient/oec-v1/trajectory/train.jsonl
+  --data data/transient/oec-v1/trajectory/train.jsonl \
+  --out data/transient/oec-v1-thoughts/trajectory/train.jsonl
 ```
 
 The builder keeps only verified, filtered runs and refuses to mix agent configs,
 sandbox backends or harness versions. Its manifest uses schema `gemma4-sft-v5`;
 `rationalize.py apply` stamps the trainer-facing version. `--tag` namespaces the
 thought file (`thoughts-<prompt_version>-<tag>.jsonl`), and steps that already
-carry native `reasoning` are not rationalized.
+carry native `reasoning` are not rationalized. `apply` refuses to overwrite an
+existing `--out` file (or the input); without `--out` it would target the clean v6 dataset.

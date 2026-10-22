@@ -49,12 +49,25 @@ def repetition_reason(messages, max_identical=3, max_reads=20):
     return None
 
 
-def handoff_problem(handoff, result):
-    """Return why a handoff run cannot be used, or None."""
+def student_submitted(messages):
+    """True if a student-side (turn 0) tool call is submit_patch."""
+    return any(call['function']['name'] == 'submit_patch'
+               for message in messages if message.get('role') == 'assistant' and message.get('_turn') == 0
+               for call in message.get('tool_calls') or [])
+
+
+def handoff_problem(handoff, result, messages=()):
+    """Return why a handoff run cannot be used, or None.
+
+    `messages` are the normalized row messages (with `_turn`); a student turn-0
+    submit_patch means the student finished before the handoff.
+    """
     if result.get('resolved') is not True:
         return 'not resolved'
     if result.get('error') or result.get('error_message'):
         return 'run error'
+    if student_submitted(messages):
+        return 'student submitted before the handoff'
     if handoff.get('teacher_calls', 0) < 1:
         return 'no teacher call after the handoff (student finished first)'
     if handoff.get('summary_calls_before_handoff', 0) > 0:
