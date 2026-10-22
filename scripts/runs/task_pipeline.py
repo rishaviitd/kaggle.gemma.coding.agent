@@ -416,6 +416,17 @@ def print_run_config(args, agent_dir):
     )
 
 
+def check_switch_point(record: dict, student_responses: list, session_events: list) -> None:
+    """Refuse a run A snapshot that does not match the switch point it claims."""
+    switch_after = record['switch_after']
+    if (len(student_responses) != switch_after or record['student_calls'] != switch_after
+            or not session_events):
+        raise RuntimeError(
+            'refusing to write a handoff snapshot that does not match the switch point: '
+            f'switch_after={switch_after}, student_calls={record["student_calls"]}, '
+            f'student_responses={len(student_responses)}, session_events={len(session_events)}')
+
+
 class RecordingContext(SwegemmaContext):
     """SwegemmaContext that keeps the run's ADK events, for the run A snapshot and the run B check."""
 
@@ -486,12 +497,17 @@ async def run_one(args, working, agent_dir, key, task, index, total, teacher_key
             # the run would look like an ordinary failed task. run_one re-raises it after
             # evaluate_task returns.
             try:
+                record = handoff.record()
+                responses = handoff.student_responses()
+                events = recorder.recorded_events
+                # Checked before any file is created, so a refused snapshot leaves no directory.
+                check_switch_point(record, responses, events)
                 write_snapshot(
                     task_logs / 'snapshot',
-                    handoff={**handoff.record(), 'task_id': task.instance_id,
+                    handoff={**record, 'task_id': task.instance_id,
                              **config_fingerprint(agent_dir, args.sandbox)},
-                    student_responses=handoff.student_responses(),
-                    session_events=recorder.recorded_events,
+                    student_responses=responses,
+                    session_events=events,
                     vllm_exchanges=proxy.exchanges,
                     manifest={**config_fingerprint(agent_dir, args.sandbox),
                               'kaggle_kernel_version': os.getenv('KAGGLE_KERNEL_RUN_TYPE', 'unknown'),

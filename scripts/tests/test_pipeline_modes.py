@@ -128,6 +128,26 @@ class RecordingContextTests(unittest.TestCase):
 
 
 
+class SwitchPointCheck(unittest.TestCase):
+    GOOD = {'switch_after': 2, 'student_calls': 2}
+
+    def test_matching_counts_pass(self):
+        task_pipeline.check_switch_point(self.GOOD, ['r1', 'r2'], [{'id': 'e'}])
+
+    def test_response_count_mismatch_is_refused_with_the_numbers(self):
+        with self.assertRaisesRegex(RuntimeError, 'switch_after=2.*student_responses=0'):
+            task_pipeline.check_switch_point(self.GOOD, [], [{'id': 'e'}])
+
+    def test_student_call_count_mismatch_is_refused(self):
+        with self.assertRaisesRegex(RuntimeError, 'student_calls=1'):
+            task_pipeline.check_switch_point({'switch_after': 2, 'student_calls': 1},
+                                             ['r1', 'r2'], [{'id': 'e'}])
+
+    def test_empty_session_events_are_refused(self):
+        with self.assertRaisesRegex(RuntimeError, 'session_events=0'):
+            task_pipeline.check_switch_point(self.GOOD, ['r1', 'r2'], [])
+
+
 class FakeLiteLlm(BaseLlm):
     """Stands in for the vLLM student and the Haiku teacher; records which models were called."""
 
@@ -143,6 +163,7 @@ class ScriptedEvaluator:
 
     turns = 0
     tool_output = 'out'
+    emit_events = True
 
     def __init__(self, config):
         self.config = config
@@ -162,8 +183,9 @@ class ScriptedEvaluator:
                 role='user', parts=[types.Part(function_response=types.FunctionResponse(
                     name='run_command',
                     response={'stdout': f'{ScriptedEvaluator.tool_output}-{turn}', 'elapsed': turn}))]))
-            context.handle_adk_event(event)
-            context.handle_adk_event(event)  # swegemma dispatches each event twice
+            if ScriptedEvaluator.emit_events:
+                context.handle_adk_event(event)
+                context.handle_adk_event(event)  # swegemma dispatches each event twice
         return SimpleNamespace(tool_calls=ScriptedEvaluator.turns, agent_patch='', resolved=False,
                                test_exit_code=None, error_message=None,
                                model_dump_json=lambda indent=2, exclude=None: '{}',
@@ -217,6 +239,7 @@ class RunOneHandoffModes(unittest.TestCase):
         for patch in self.patches:
             patch.start()
         FakeLiteLlm.calls = []
+        ScriptedEvaluator.emit_events = True
 
     def make_litellm(self, model, **kwargs):
         self.constructed.append(model)
@@ -271,6 +294,20 @@ class RunOneHandoffModes(unittest.TestCase):
                                side_effect=OSError('disk full')):
             with self.assertRaisesRegex(RuntimeError, 'snapshot write failed.*disk full'):
                 self.run_mode()
+        self.assertFalse((self.logs / TASK / 'snapshot').exists())
+
+    def test_a_snapshot_with_mismatched_responses_is_refused_and_leaves_no_directory(self):
+        ScriptedEvaluator.turns = self.switch_after + 1
+        with mock.patch.object(handoff_llm.HandoffLlm, 'student_responses', return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, 'snapshot write failed.*student_responses=0'):
+                self.run_mode()
+        self.assertFalse((self.logs / TASK / 'snapshot').exists())
+
+    def test_a_snapshot_without_session_events_is_refused(self):
+        ScriptedEvaluator.turns = self.switch_after + 1
+        ScriptedEvaluator.emit_events = False
+        with self.assertRaisesRegex(RuntimeError, 'snapshot write failed.*session_events=0'):
+            self.run_mode()
         self.assertFalse((self.logs / TASK / 'snapshot').exists())
 
     def test_run_b_rejects_a_changed_tool_result(self):
