@@ -25,6 +25,7 @@ from prompts.rationalize_thought import USER_TEMPLATE, VERSIONS  # noqa: E402
 
 DEFAULT_DATA = ROOT / "data/transient/sft-haiku-solved-v5-none/trajectory/train.jsonl"
 OUT_DIR = ROOT / "data/transient/rationalize"
+TAG = ""
 HISTORY_OBS_CHARS = 0  # tool output chars shown to the generator (0 = none); training data is untouched
 MAX_HISTORY_CHARS = 60000
 LEAK_WORDS = re.compile(r"\b(the output (shows|showed)|turned out|it worked|it passed|as expected|tool call|next step)\b", re.I)
@@ -98,6 +99,8 @@ def build_jobs(rows):
         for start, idxs in groups(msgs):
             if not any(msgs[k].get("tool_calls") for k in idxs):
                 continue
+            if (msgs[idxs[0]].get("reasoning") or "").strip():
+                continue  # native reasoning (OEC student turns) is kept as is
             jobs.append({"row": r, "msg": start, "idxs": idxs})
     return jobs
 
@@ -163,7 +166,7 @@ def run(args):
         jobs = jobs[: args.limit]
     system = VERSIONS[args.prompt_version]["system"]
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUT_DIR / (f"sample-{args.prompt_version}.jsonl" if args.cmd == "sample" else f"thoughts-{args.prompt_version}.jsonl")
+    out_path = OUT_DIR / (f"sample-{args.prompt_version}.jsonl" if args.cmd == "sample" else f"thoughts-{args.prompt_version}{TAG}.jsonl")
     done = set()
     if args.cmd == "run" and out_path.exists():
         done = {(j["row"], j["msg"]) for j in map(json.loads, open(out_path)) if j.get("thought")}
@@ -228,7 +231,7 @@ def split_at_user_turns(row):
 def apply(args):
     rows = [json.loads(l) for l in open(args.data)]
     thoughts = {}
-    for line in open(OUT_DIR / f"thoughts-{args.prompt_version}.jsonl"):
+    for line in open(OUT_DIR / f"thoughts-{args.prompt_version}{TAG}.jsonl"):
         r = json.loads(line)
         if r.get("thought"):
             thoughts[(r["row"], r["msg"])] = r["thought"]
@@ -273,8 +276,10 @@ def main():
     p.add_argument("--retries", type=int, default=2)
     p.add_argument("--out", default=str(ROOT / "data/transient/sft-haiku-solved-v6-thoughts/trajectory/train.jsonl"))
     p.add_argument("--result-chars", type=int, default=300)
+    p.add_argument("--tag", default="", help="Namespace the thought file, e.g. oec-v1")
     args = p.parse_args()
-    global HISTORY_OBS_CHARS
+    global HISTORY_OBS_CHARS, TAG
+    TAG = f"-{args.tag}" if args.tag else ""
     HISTORY_OBS_CHARS = args.result_chars
     if args.cmd == "sample" and not args.limit:
         args.limit = 20

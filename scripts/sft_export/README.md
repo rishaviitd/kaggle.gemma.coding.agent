@@ -65,3 +65,24 @@ failed ones) of each `task_id` that resolved in at least one attempt.
 ```bash
 .venv/bin/python -m unittest discover -s scripts/sft_export/tests -v
 ```
+
+## OEC data (student-to-teacher handoff)
+
+Pipeline: `run_oec.py` (collect handoff runs) -> `build_oec_dataset.py` ->
+`rationalize.py run/apply --tag oec-v1` -> `merge_datasets.py` -> `audit_parity.py`.
+Exact commands are in Task 9 of the implementation plan.
+
+```bash
+.venv/bin/python scripts/sft_export/build_oec_dataset.py \
+  --logs logs/remote/rishav/inspiration-one --output data/transient/oec-v1
+.venv/bin/python scripts/sft_export/rationalize.py run --tag oec-v1 \
+  --data data/transient/oec-v1/trajectory/train.jsonl
+.venv/bin/python scripts/sft_export/rationalize.py apply --tag oec-v1 \
+  --data data/transient/oec-v1/trajectory/train.jsonl
+```
+
+The builder keeps only verified, filtered runs and refuses to mix agent configs,
+sandbox backends or harness versions. Its manifest uses schema `gemma4-sft-v5`;
+`rationalize.py apply` stamps the trainer-facing version. `--tag` namespaces the
+thought file (`thoughts-<prompt_version>-<tag>.jsonl`), and steps that already
+carry native `reasoning` are not rationalized.
