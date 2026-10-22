@@ -14,13 +14,8 @@ for arg in "$@"; do
   fi
 done
 
-# Manifest column 1 is task_id. Column 2 is repo. The unset path keeps its
-# original column so its behaviour does not change.
-if [[ -n "${TASK_IDS_FILE:-}" ]]; then
-  id_column=1
-else
-  id_column=2
-fi
+# Manifest column 1 is task_id (column 2 is repo).
+id_column=1
 
 if (( list_only )) && [[ -z "${TASK_IDS_FILE:-}" ]]; then
   echo "--list-only requires TASK_IDS_FILE to be set." >&2
@@ -112,11 +107,9 @@ shopt -s nullglob
 export PIP_CACHE_DIR=/tmp/pip-cache UV_CACHE_DIR=/tmp/uv-cache
 python -m pip install --target /tmp/task-build-tools -q uv
 export PATH="/tmp/task-build-tools/bin:$PATH" PYTHONPATH=/tmp/task-build-tools
+id_column=1
 if [[ -n "${TASK_IDS_FILE_IN_CONTAINER:-}" ]]; then
-  id_column=1
   selected_ids="$(sed -e 's/[[:space:]]*$//' -e '/^$/d' "$TASK_IDS_FILE_IN_CONTAINER")"
-else
-  id_column=2
 fi
 for split in train dev val; do
   manifest="data/$split/manifest.csv"
